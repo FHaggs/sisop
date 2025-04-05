@@ -42,19 +42,23 @@ public class Sistema {
 			}
 			; // cada posicao da memoria inicializada
 		}
+
+		public int getSize() {
+			return pos.length;
+		}
 	}
 
-	public class Word {    // cada posicao da memoria tem uma instrucao (ou um dado)
+	public class Word { // cada posicao da memoria tem uma instrucao (ou um dado)
 		public Opcode opc; //
-		public int ra;     // indice do primeiro registrador da operacao (Rs ou Rd cfe opcode na tabela)
-		public int rb;     // indice do segundo registrador da operacao (Rc ou Rs cfe operacao)
-		public int p;      // parametro para instrucao (k ou A cfe operacao), ou o dado, se opcode = DADO
+		public int ra; // indice do primeiro registrador da operacao (Rs ou Rd cfe opcode na tabela)
+		public int rb; // indice do segundo registrador da operacao (Rc ou Rs cfe operacao)
+		public int p; // parametro para instrucao (k ou A cfe operacao), ou o dado, se opcode = DADO
 
 		public Word(Opcode _opc, int _ra, int _rb, int _p) { // vide definição da VM - colunas vermelhas da tabela
 			opc = _opc;
 			ra = _ra;
 			rb = _rb;
-			p  = _p;
+			p = _p;
 		}
 	}
 
@@ -63,100 +67,123 @@ public class Sistema {
 	// -----------------------------------------------------
 
 	public enum Opcode {
-		DATA, ___,                      // se memoria nesta posicao tem um dado, usa DATA, se nao usada ee NULO ___
+		DATA, ___, // se memoria nesta posicao tem um dado, usa DATA, se nao usada ee NULO ___
 		JMP, JMPI, JMPIG, JMPIL, JMPIE, // desvios
 		JMPIM, JMPIGM, JMPILM, JMPIEM,
 		JMPIGK, JMPILK, JMPIEK, JMPIGT,
-		ADDI, SUBI, ADD, SUB, MULT,    // matematicos
+		ADDI, SUBI, ADD, SUB, MULT, // matematicos
 		LDI, LDD, STD, LDX, STX, MOVE, // movimentacao
-		SYSCALL, STOP                  // chamada de sistema e parada
+		SYSCALL, STOP // chamada de sistema e parada
 	}
 
-	public enum Interrupts {           // possiveis interrupcoes que esta CPU gera
+	public enum Interrupts { // possiveis interrupcoes que esta CPU gera
 		noInterrupt, intEnderecoInvalido, intInstrucaoInvalida, intOverflow, intSTOP;
 	}
 
 	public class CPU {
 		private int maxInt; // valores maximo e minimo para inteiros nesta cpu
 		private int minInt;
-		                    // CONTEXTO da CPU ...
-		private int pc;     // ... composto de program counter,
-		private Word ir;    // instruction register,
-		private int[] reg;  // registradores da CPU
+		// CONTEXTO da CPU ...
+		private int pc; // ... composto de program counter,
+		private Word ir; // instruction register,
+		private int[] reg; // registradores da CPU
 		private Interrupts irpt; // durante instrucao, interrupcao pode ser sinalizada
-		                    // FIM CONTEXTO DA CPU: tudo que precisa sobre o estado de um processo para
-		                    // executa-lo
-		                    // nas proximas versoes isto pode modificar
+		// FIM CONTEXTO DA CPU: tudo que precisa sobre o estado de um processo para
+		// executa-lo
+		// nas proximas versoes isto pode modificar
 
-		private Word[] m;   // m é o array de memória "física", CPU tem uma ref a m para acessar
+		private Word[] m; // m é o array de memória "física", CPU tem uma ref a m para acessar
+		private List<Integer> page_table; // O sistema operacional vai setar a page table quando setar o contexto de
+											// execucao
+		private int pageSize;
 
-		private InterruptHandling ih;    // significa desvio para rotinas de tratamento de Int - se int ligada, desvia
+		private InterruptHandling ih; // significa desvio para rotinas de tratamento de Int - se int ligada, desvia
 		private SysCallHandling sysCall; // significa desvio para tratamento de chamadas de sistema
 
-		private boolean cpuStop;    // flag para parar CPU - caso de interrupcao que acaba o processo, ou chamada stop - 
+		private boolean cpuStop; // flag para parar CPU - caso de interrupcao que acaba o processo, ou chamada
+									// stop -
 									// nesta versao acaba o sistema no fim do prog
 
-		                            // auxilio aa depuração
-		private boolean debug;      // se true entao mostra cada instrucao em execucao
-		private Utilities u;        // para debug (dump)
+		// auxilio aa depuração
+		private boolean debug; // se true entao mostra cada instrucao em execucao
+		private Utilities u; // para debug (dump)
 
-		public CPU(Memory _mem, boolean _debug) { // ref a MEMORIA passada na criacao da CPU
-			maxInt = 32767;            // capacidade de representacao modelada
-			minInt = -32767;           // se exceder deve gerar interrupcao de overflow
-			m = _mem.pos;              // usa o atributo 'm' para acessar a memoria, só para ficar mais pratico
-			reg = new int[10];         // aloca o espaço dos registradores - regs 8 e 9 usados somente para IO
-
-			debug = _debug;            // se true, print da instrucao em execucao
-
+		public CPU(Memory _mem, boolean _debug, int _pageSize) { // ref a MEMORIA passada na criacao da CPU
+			maxInt = 32767; // capacidade de representacao modelada
+			minInt = -32767; // se exceder deve gerar interrupcao de overflow
+			m = _mem.pos; // usa o atributo 'm' para acessar a memoria, só para ficar mais pratico
+			reg = new int[10]; // aloca o espaço dos registradores - regs 8 e 9 usados somente para IO
+			debug = _debug; // se true, print da instrucao em execucao
+			pageSize = _pageSize;
 		}
 
 		public void setAddressOfHandlers(InterruptHandling _ih, SysCallHandling _sysCall) {
-			ih = _ih;                  // aponta para rotinas de tratamento de int
-			sysCall = _sysCall;        // aponta para rotinas de tratamento de chamadas de sistema
+			ih = _ih; // aponta para rotinas de tratamento de int
+			sysCall = _sysCall; // aponta para rotinas de tratamento de chamadas de sistema
 		}
 
 		public void setUtilities(Utilities _u) {
-			u = _u;                     // aponta para rotinas utilitárias - fazer dump da memória na tela
+			u = _u; // aponta para rotinas utilitárias - fazer dump da memória na tela
 		}
 
-
-                                       // verificação de enderecamento 
-		private boolean legal(int e) { // todo acesso a memoria tem que ser verificado se é válido - 
-			                           // aqui no caso se o endereco é um endereco valido em toda memoria
+		// verificação de enderecamento FISICO
+		private boolean legal(int e) { // todo acesso a memoria tem que ser verificado se é válido -
+										// aqui no caso se o endereco é um endereco valido em toda memoria
 			if (e >= 0 && e < m.length) {
 				return true;
 			} else {
-				irpt = Interrupts.intEnderecoInvalido;    // se nao for liga interrupcao no meio da exec da instrucao
+				irpt = Interrupts.intEnderecoInvalido; // se nao for liga interrupcao no meio da exec da instrucao
 				return false;
 			}
 		}
 
-		private boolean testOverflow(int v) {             // toda operacao matematica deve avaliar se ocorre overflow
+		private boolean testOverflow(int v) { // toda operacao matematica deve avaliar se ocorre overflow
 			if ((v < minInt) || (v > maxInt)) {
-				irpt = Interrupts.intOverflow;            // se houver liga interrupcao no meio da exec da instrucao
+				irpt = Interrupts.intOverflow; // se houver liga interrupcao no meio da exec da instrucao
 				return false;
 			}
 			;
 			return true;
 		}
 
-		public void setContext(int _pc) {                 // usado para setar o contexto da cpu para rodar um processo
-			                                              // [ nesta versao é somente colocar o PC na posicao 0 ]
-			pc = _pc;                                     // pc cfe endereco logico
-			irpt = Interrupts.noInterrupt;                // reset da interrupcao registrada
-			// TODO: SETAR PAGE TABLE
+		public void setContext(int _pc, List<Integer> _page_table) { // usado para setar o contexto da cpu para rodar um
+																		// processo
+			// [ nesta versao é somente colocar o PC na posicao 0 ]
+			pc = _pc; // pc cfe endereco logico
+			irpt = Interrupts.noInterrupt;
+			// reset da interrupcao registrada
+			this.page_table = _page_table;
 		}
 
-		public void run() {                               // execucao da CPU supoe que o contexto da CPU, vide acima, 
-														  // esta devidamente setado
+		private int translateAddress(int logicalAddress) {
+			int pageNumber = logicalAddress / pageSize;
+			int offset = logicalAddress % pageSize;
+
+			if (pageNumber >= page_table.size() || page_table.get(pageNumber) == null) {
+				irpt = Interrupts.intEnderecoInvalido;
+				return -1; // Indica endereço inválido
+			}
+
+			int frameNumber = page_table.get(pageNumber);
+			return (frameNumber * pageSize) + offset;
+		}
+
+		public void run() { // execucao da CPU supoe que o contexto da CPU, vide acima,
+							// esta devidamente setado
 			cpuStop = false;
-			while (!cpuStop) {      // ciclo de instrucoes. acaba cfe resultado da exec da instrucao, veja cada caso.
+			while (!cpuStop) { // ciclo de instrucoes. acaba cfe resultado da exec da instrucao, veja cada
+								// caso.
 
 				// --------------------------------------------------------------------------------------------------
 				// FASE DE FETCH
-				if (legal(pc)) { // pc valido
-					ir = m[pc];  // <<<<<<<<<<<< AQUI faz FETCH - busca posicao da memoria apontada por pc, guarda em ir TODO: MEXER COM PAGINACAO
-					             // resto é dump de debug
+
+				int physicalPC = translateAddress(pc);
+
+				if (legal(physicalPC)) { // pc valido FISICO
+					ir = m[physicalPC]; // <<<<<<<<<<<< AQUI faz FETCH - busca posicao da memoria apontada por pc,
+					if (irpt != Interrupts.noInterrupt)
+						break;
+
 					if (debug) {
 						System.out.print("                                              regs: ");
 						for (int i = 0; i < 10; i++) {
@@ -170,42 +197,55 @@ public class Sistema {
 						u.dump(ir);
 					}
 
-				// --------------------------------------------------------------------------------------------------
-				// FASE DE EXECUCAO DA INSTRUCAO CARREGADA NO ir
-					switch (ir.opc) {       // conforme o opcode (código de operação) executa
+					// --------------------------------------------------------------------------------------------------
+					// FASE DE EXECUCAO DA INSTRUCAO CARREGADA NO ir
+					switch (ir.opc) { // conforme o opcode (código de operação) executa
 
 						// Instrucoes de Busca e Armazenamento em Memoria
-						case LDI: // Rd ← k        veja a tabela de instrucoes do HW simulado para entender a semantica da instrucao
+						case LDI: // Rd ← k veja a tabela de instrucoes do HW simulado para entender a semantica
+									// da instrucao
 							reg[ir.ra] = ir.p;
 							pc++;
 							break;
 						case LDD: // Rd <- [A]
-							if (legal(ir.p)) {
-								reg[ir.ra] = m[ir.p].p;
+							int physicalAddressLDD = translateAddress(ir.p);
+							if (irpt != Interrupts.noInterrupt)
+								break;
+							if (legal(physicalAddressLDD)) {
+								reg[ir.ra] = m[physicalAddressLDD].p;
 								pc++;
 							}
 							break;
 						case LDX: // RD <- [RS] // NOVA
-							if (legal(reg[ir.rb])) {
-								reg[ir.ra] = m[reg[ir.rb]].p;
+							int physicalAddressLDX = translateAddress(reg[ir.rb]);
+							if (irpt != Interrupts.noInterrupt)
+								break;
+							if (legal(physicalAddressLDX)) {
+								reg[ir.ra] = m[physicalAddressLDX].p;
 								pc++;
 							}
 							break;
 						case STD: // [A] ← Rs
-							if (legal(ir.p)) {
-								m[ir.p].opc = Opcode.DATA;
-								m[ir.p].p = reg[ir.ra];
+							int physicalAddressSTD = translateAddress(ir.p);
+							if (irpt != Interrupts.noInterrupt)
+								break;
+							if (legal(physicalAddressSTD)) {
+								m[physicalAddressSTD].opc = Opcode.DATA;
+								m[physicalAddressSTD].p = reg[ir.ra];
 								pc++;
-                                if (debug) 
-								    {   System.out.print("                                  ");   
-									    u.dump(ir.p,ir.p+1);							
-									}
+								if (debug) {
+									System.out.print("                                  ");
+									u.dump(physicalAddressSTD, physicalAddressSTD + 1);
 								}
+							}
 							break;
 						case STX: // [Rd] ←Rs
-							if (legal(reg[ir.ra])) {
-								m[reg[ir.ra]].opc = Opcode.DATA;
-								m[reg[ir.ra]].p = reg[ir.rb];
+							int physicalAddressSTX = translateAddress(reg[ir.ra]);
+							if (irpt != Interrupts.noInterrupt)
+								break;
+							if (legal(physicalAddressSTX)) {
+								m[physicalAddressSTX].opc = Opcode.DATA;
+								m[physicalAddressSTX].p = reg[ir.rb];
 								pc++;
 							}
 							;
@@ -246,7 +286,12 @@ public class Sistema {
 							pc = ir.p;
 							break;
 						case JMPIM: // PC <- [A]
-							      pc = m[ir.p].p;
+							int physicalAddressJMPIM = translateAddress(ir.p);
+							if (irpt != Interrupts.noInterrupt)
+								break;
+							if (legal(physicalAddressJMPIM)) {
+								pc = m[physicalAddressJMPIM].p;
+							}
 							break;
 						case JMPIG: // If Rc > 0 Then PC ← Rs Else PC ← PC +1
 							if (reg[ir.rb] > 0) {
@@ -291,26 +336,36 @@ public class Sistema {
 							}
 							break;
 						case JMPIGM: // If RC > 0 then PC <- [A] else PC++
-						    if (legal(ir.p)){
-							    if (reg[ir.rb] > 0) {
-								   pc = m[ir.p].p;
-							    } else {
-								  pc++;
-							   }
-						    }
+							if (legal(ir.p)) {
+								if (reg[ir.rb] > 0) {
+									pc = m[ir.p].p;
+								} else {
+									pc++;
+								}
+							}
 							break;
 						case JMPILM: // If RC < 0 then PC <- k else PC++
-							if (reg[ir.rb] < 0) {
-								pc = m[ir.p].p;
-							} else {
-								pc++;
+							int physicalAddressJMPILM = translateAddress(ir.p);
+							if (irpt != Interrupts.noInterrupt)
+								break;
+							if (legal(physicalAddressJMPILM)) {
+								if (reg[ir.rb] < 0) {
+									pc = m[physicalAddressJMPILM].p;
+								} else {
+									pc++;
+								}
 							}
 							break;
 						case JMPIEM: // If RC = 0 then PC <- k else PC++
-							if (reg[ir.rb] == 0) {
-								pc = m[ir.p].p;
-							} else {
-								pc++;
+							int physicalAddressJMPIEM = translateAddress(ir.p);
+							if (irpt != Interrupts.noInterrupt)
+								break;
+							if (legal(physicalAddressJMPIEM)) {
+								if (reg[ir.rb] == 0) {
+									pc = m[physicalAddressJMPIEM].p;
+								} else {
+									pc++;
+								}
 							}
 							break;
 						case JMPIGT: // If RS>RC then PC <- k else PC++
@@ -346,8 +401,8 @@ public class Sistema {
 				// --------------------------------------------------------------------------------------------------
 				// VERIFICA INTERRUPÇÃO !!! - TERCEIRA FASE DO CICLO DE INSTRUÇÕES
 				if (irpt != Interrupts.noInterrupt) { // existe interrupção
-					ih.handle(irpt);                  // desvia para rotina de tratamento - esta rotina é do SO
-					cpuStop = true;                   // nesta versao, para a CPU
+					ih.handle(irpt); // desvia para rotina de tratamento - esta rotina é do SO
+					cpuStop = true; // nesta versao, para a CPU
 				}
 			} // FIM DO CICLO DE UMA INSTRUÇÃO
 		}
@@ -361,11 +416,14 @@ public class Sistema {
 	public class HW {
 		public Memory mem;
 		public CPU cpu;
+		public int pageSize;
 
-		public HW(int tamMem) {
+		public HW(int tamMem, int _pageSize) {
 			mem = new Memory(tamMem);
-			cpu = new CPU(mem, true); // true liga debug
+			pageSize = _pageSize;
+			cpu = new CPU(mem, true, pageSize);
 		}
+
 	}
 	// -------------------------------------------------------------------------------------------------------
 
@@ -406,22 +464,24 @@ public class Sistema {
 		}
 
 		public void stop() { // chamada de sistema indicando final de programa
-							 // nesta versao cpu simplesmente pára
+								// nesta versao cpu simplesmente pára
 			System.out.println("                                               SYSCALL STOP");
 		}
 
-		public void handle() { // chamada de sistema 
-			                   // suporta somente IO, com parametros 
-							   // reg[8] = in ou out    e reg[9] endereco do inteiro
+		public void handle() { // chamada de sistema
+								// suporta somente IO, com parametros
+								// reg[8] = in ou out e reg[9] endereco do inteiro
 			System.out.println("SYSCALL pars:  " + hw.cpu.reg[8] + " / " + hw.cpu.reg[9]);
 
-			if  (hw.cpu.reg[8]==1){
-				  // leitura ...
+			if (hw.cpu.reg[8] == 1) {
+				// leitura ...
 
-			} else if (hw.cpu.reg[8]==2){
-				  // escrita - escreve o conteuodo da memoria na posicao dada em reg[9]
-				  System.out.println("OUT:   "+ hw.mem.pos[hw.cpu.reg[9]].p);
-			} else {System.out.println("  PARAMETRO INVALIDO"); }		
+			} else if (hw.cpu.reg[8] == 2) {
+				// escrita - escreve o conteuodo da memoria na posicao dada em reg[9]
+				System.out.println("OUT:   " + hw.mem.pos[hw.cpu.reg[9]].p);
+			} else {
+				System.out.println("  PARAMETRO INVALIDO");
+			}
 		}
 	}
 
@@ -470,60 +530,131 @@ public class Sistema {
 		}
 
 		private void loadAndExec(Word[] p) {
-			// TODO: Mudar para paginacao
-			loadProgram(p); // carga do programa na memoria
-			System.out.println("---------------------------------- programa carregado na memoria");
-			dump(0, p.length); // dump da memoria nestas posicoes
-			hw.cpu.setContext(0); // seta pc para endereço 0 - ponto de entrada dos programas
-			System.out.println("---------------------------------- inicia execucao ");
-			hw.cpu.run(); // cpu roda programa ate parar
-			System.out.println("---------------------------------- memoria após execucao ");
-			dump(0, p.length); // dump da memoria com resultado
+			int programSize = p.length;
+			int pageSize = hw.pageSize;
+			int numPagesNeeded = (int) Math.ceil((double) programSize / pageSize);
+			List<Integer> pageTable = new ArrayList<>();
+
+			System.out.println("UTILS: Tentando alocar " + programSize + " palavras (" + numPagesNeeded + " paginas).");
+			if (so.mm.aloca(programSize, pageTable)) {
+				System.out.println("UTILS: Alocacao bem-sucedida. Tabela de Paginas (frame numbers): " + pageTable);
+
+				System.out.println("UTILS: Carregando programa na memoria (paginada)...");
+				for (int i = 0; i < programSize; i++) {
+					int logicalAddress = i;
+					int pageNumber = logicalAddress / pageSize;
+					int offset = logicalAddress % pageSize;
+					int frameNumber = pageTable.get(pageNumber);
+					int physicalAddress = (frameNumber * pageSize) + offset;
+
+					if (physicalAddress >= 0 && physicalAddress < hw.mem.pos.length) {
+						hw.mem.pos[physicalAddress].opc = p[i].opc;
+						hw.mem.pos[physicalAddress].ra = p[i].ra;
+						hw.mem.pos[physicalAddress].rb = p[i].rb;
+						hw.mem.pos[physicalAddress].p = p[i].p;
+					} else {
+						System.err.println("UTILS: Erro ao carregar na posicao fisica: " + physicalAddress);
+						so.mm.desaloca(pageTable);
+						return;
+					}
+				}
+				System.out.println("---------------------------------- programa carregado na memoria (paginada)");
+				dumpMemoryByPageTable(pageTable); // Dump apenas as paginas do programa
+
+				hw.cpu.setContext(0, pageTable); // Seta pc para endereço 0 (lógico) e a tabela de páginas
+				System.out.println("---------------------------------- inicia execucao ");
+				hw.cpu.run(); // cpu roda programa ate parar
+				System.out.println("---------------------------------- memoria após execucao ");
+				dumpMemoryByPageTable(pageTable); // Dump novamente
+
+				so.mm.desaloca(pageTable); // Desaloca os frames do programa
+			} else {
+				System.out.println("UTILS: Falha na alocacao de memoria para o programa.");
+			}
+
+		}
+
+		private void dumpMemoryByPageTable(List<Integer> pageTable) {
+			System.out.println("------------------- Dump da Memoria (Paginada) -------------------");
+			for (int i = 0; i < pageTable.size(); i++) {
+				Integer frameNumber = pageTable.get(i);
+				if (frameNumber != null) {
+					int startAddress = frameNumber * hw.pageSize;
+					int endAddress = startAddress + hw.pageSize;
+					System.out.println("Pagina " + i + " -> Frame " + frameNumber + " (Endereco Fisico " + startAddress
+							+ "-" + (endAddress - 1) + "):");
+					dump(startAddress, endAddress);
+				} else {
+					System.out.println("Pagina " + i + " nao alocada.");
+				}
+			}
+			System.out.println("------------------------------------------------------------------");
 		}
 	}
 
-
 	public class MemoryManagment {
 		private HashSet<Integer> free_set; // Start pos in memory
-		public MemoryManagment(int tamMem, int tamPg){
+		private int tamFrame;
+
+		public MemoryManagment(int tamMem, int tamPg) {
 			int numFrames = tamMem / tamPg;
 			this.free_set = new HashSet<>();
-			for(int i=0;i<numFrames;i++){
+			this.tamFrame = tamPg;
+			for (int i = 0; i < numFrames; i++) {
 				free_set.add(i * tamPg);
 			}
 		}
 
-		public boolean aloca(int numPalavras, List<Integer> tabela_paginas){
-			if(free_set.size() < numPalavras){
+		public boolean aloca(int numPalavras, List<Integer> tabela_paginas) {
+			int numPagesNeeded = (int) Math.ceil((double) numPalavras / tamFrame);
+			if (free_set.size() < numPagesNeeded) {
+				System.out.println("GM: Nao ha frames suficientes para alocar " + numPalavras + " palavras.");
 				return false;
 			}
 			Iterator<Integer> iterator = free_set.iterator();
-			for(int i=0;i<numPalavras;i++){
-				int frame = iterator.next();
-				tabela_paginas.add(frame);
-				free_set.remove(frame);
+			int pagesAllocated = 0;
+			while (iterator.hasNext() && pagesAllocated < numPagesNeeded) {
+				int frameStart = iterator.next();
+				tabela_paginas.add(frameStart / tamFrame); // Store frame number
+				iterator.remove(); // Use iterator.remove() para remover o elemento
+				pagesAllocated++;
 			}
+
+			if (pagesAllocated < numPagesNeeded) {
+				// Se não conseguiu alocar todas as páginas necessárias, desfaz a alocação
+				desaloca(tabela_paginas);
+				System.out.println("GM: Erro ao alocar todos os frames necessarios.");
+				return false;
+			}
+
+			System.out.println("GM: Alocou " + numPagesNeeded + " frames. Tabela de Paginas: " + tabela_paginas);
 			return true;
 		}
 
-		public void desaloca(List<Integer> tabela_paginas){
-			for(int i=0;i<tabela_paginas.size();i++){
-				free_set.add(tabela_paginas.get(i));
+		public void desaloca(List<Integer> tabela_paginas) {
+			System.out.print("GM: Desalocando frames: ");
+			for (Integer frameNumber : tabela_paginas) {
+				free_set.add(frameNumber * tamFrame);
+				System.out.print(frameNumber + " ");
 			}
+			System.out.println();
+			tabela_paginas.clear();
 		}
-		
+
 	}
 
 	public class SO {
 		public InterruptHandling ih;
 		public SysCallHandling sc;
 		public Utilities utils;
+		public MemoryManagment mm;
 
 		public SO(HW hw) {
 			ih = new InterruptHandling(hw); // rotinas de tratamento de int
 			sc = new SysCallHandling(hw); // chamadas de sistema
 			hw.cpu.setAddressOfHandlers(ih, sc);
 			utils = new Utilities(hw);
+			mm = new MemoryManagment(hw.mem.getSize(), hw.pageSize);
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
@@ -534,13 +665,12 @@ public class Sistema {
 	public SO so;
 	public Programs progs;
 
-	public Sistema(int tamMem) {
-		hw = new HW(tamMem);           // memoria do HW tem tamMem palavras
+	public Sistema(int tamMem, int page_size) {
+		hw = new HW(tamMem, page_size); // memoria do HW tem tamMem palavras
 		so = new SO(hw);
 		hw.cpu.setUtilities(so.utils); // permite cpu fazer dump de memoria ao avancar
 		progs = new Programs();
 	}
-
 
 	public void run() {
 
@@ -562,7 +692,7 @@ public class Sistema {
 	// -------------------------------------------------------------------------------------------------------
 	// ------------------- instancia e testa sistema
 	public static void main(String args[]) {
-		Sistema s = new Sistema(1024);
+		Sistema s = new Sistema(1024, 16);
 		s.run();
 	}
 
