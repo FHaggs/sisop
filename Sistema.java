@@ -146,13 +146,14 @@ public class Sistema {
 			return true;
 		}
 
-		public void setContext(int _pc, List<Integer> _page_table) { // usado para setar o contexto da cpu para rodar um
+		public void setContext(int _pc, List<Integer> _page_table, int[] regs) { // usado para setar o contexto da cpu para rodar um
 																		// processo
 			// [ nesta versao é somente colocar o PC na posicao 0 ]
 			pc = _pc; // pc cfe endereco logico
 			irpt = Interrupts.noInterrupt;
 			// reset da interrupcao registrada
 			this.page_table = _page_table;
+			this.reg = regs; // setar o contexto da CPU para o processo
 		}
 
 		private int translateAddress(int logicalAddress) {
@@ -530,6 +531,7 @@ public class Sistema {
 		}
 
 		private void loadAndExec(Word[] p) {
+			// NAO USAR ESSE METEDO
 			int programSize = p.length;
 			int pageSize = hw.pageSize;
 			int numPagesNeeded = (int) Math.ceil((double) programSize / pageSize);
@@ -561,7 +563,7 @@ public class Sistema {
 				System.out.println("---------------------------------- programa carregado na memoria (paginada)");
 				dumpMemoryByPageTable(pageTable); // Dump apenas as paginas do programa
 
-				hw.cpu.setContext(0, pageTable); // Seta pc para endereço 0 (lógico) e a tabela de páginas
+				// hw.cpu.setContext(0, pageTable); // Seta pc para endereço 0 (lógico) e a tabela de páginas
 				System.out.println("---------------------------------- inicia execucao ");
 				hw.cpu.run(); // cpu roda programa ate parar
 				System.out.println("---------------------------------- memoria após execucao ");
@@ -599,6 +601,7 @@ public class Sistema {
 		public Contexto(int pid) {
 			this.pc = 0;
 			this.pid = pid;
+			this.regs = new int[10]; // Inicializa os registradores do processo
 		}
 		public void set_state(int[] regs, int pc) {
 			this.regs = regs;
@@ -637,7 +640,7 @@ public class Sistema {
 				if (pcb.pid == pid) {
 					running = pcb; // Define o PCB como o processo em execução
 					pcb.isRunning = true; // Marca o processo como em execução
-					cpu.setContext(pcb.contexto.pc, pcb.pageTable); // Seta o contexto da CPU para o processo	
+					cpu.setContext(pcb.contexto.pc, pcb.pageTable, pcb.contexto.regs); // Seta o contexto da CPU para o processo	
 					cpu.run();
 					break;
 				}
