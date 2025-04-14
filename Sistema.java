@@ -591,46 +591,122 @@ public class Sistema {
 			System.out.println("------------------------------------------------------------------");
 		}
 	}
+	public class Contexto {
+		public int[] regs; // registradores do processo
+		public int pc; // contador de programa do processo
+		public int pid; // ID do processo
+
+		public Contexto(int pid) {
+			this.pc = 0;
+			this.pid = pid;
+		}
+		public void set_state(int[] regs, int pc) {
+			this.regs = regs;
+			this.pc = pc;
+		}
+
+	}
+	public class ProcessControlBlock {
+		public int pid; // ID do processo
+		public List<Integer> pageTable; // Tabela de páginas do processo
+		public boolean isRunning; // Indica se o processo está em execução
+		public ProcessControlBlock next; // Ponteiro para o próximo PCB na lista encadeada
+		public Contexto contexto; // Contexto do processo (registradores, etc.)
+
+		public ProcessControlBlock(int pid, List<Integer> pageTable, int pc) {
+			this.pid = pid;
+			this.pageTable = pageTable;
+			this.isRunning = false;
+			this.next = null; // Inicializa o próximo PCB como nulo
+			this.contexto = new Contexto(pid); // Cria um novo contexto para o processo
+		}
+	}
 	public class ProcessManagement {
-		private class Contexto {
-			public int[] regs; // registradores do processo
-			public int pc; // contador de programa do processo
-			public int pid; // ID do processo
 
-			public Contexto(int pid, int[] regs) {
-				this.regs = regs;
-				this.pc = 0;
-				this.pid = pid;
-			}
-		}
-
-		private class ProcessControlBlock {
-			public int pid; // ID do processo
-			public List<Integer> pageTable; // Tabela de páginas do processo
-			public boolean isRunning; // Indica se o processo está em execução
-			public ProcessControlBlock next; // Ponteiro para o próximo PCB na lista encadeada
-			public Contexto contexto; // Contexto do processo (registradores, etc.)
-
-			public ProcessControlBlock(int pid, List<Integer> pageTable, int pc) {
-				this.pid = pid;
-				this.pageTable = pageTable;
-				this.isRunning = false;
-				this.next = null; // Inicializa o próximo PCB como nulo
-				this.contexto = new Contexto(pid); // Cria um novo contexto para o processo
-			}
-		}
 		ProcessControlBlock head = null;
 		ProcessControlBlock tail = null;
-
-		public ProcessManagement(){
+		ProcessControlBlock running = null; // PCB do processo em execução
+		// Lista de aptos
+		List<ProcessControlBlock> aptos = new ArrayList<>(); // Lista de processos aptos para execução
+		CPU cpu = null; // CPU associada ao sistema operacional
+		public ProcessManagement(CPU cpu) {
+			this.cpu = cpu;
+		}
+		public void exec(int pid) {
+			for(ProcessControlBlock pcb : aptos) {
+				if (pcb.pid == pid) {
+					running = pcb; // Define o PCB como o processo em execução
+					pcb.isRunning = true; // Marca o processo como em execução
+					cpu.setContext(pcb.contexto.pc, pcb.pageTable); // Seta o contexto da CPU para o processo	
+					cpu.run();
+					break;
+				}
+			}
 
 		}
 
 		boolean criaProcesso(Word[] programa){
-			return;
+			int programSize = programa.length;
+			List<Integer> pageTable = new ArrayList<>();
+			int pageSize = hw.pageSize;
+
+			if (!so.mm.aloca(programSize, pageTable)){
+				System.out.println("GM: Nao ha frames suficientes para alocar o programa.");
+				return false;
+			}
+			if (head == null) {
+				head = new ProcessControlBlock(0, pageTable, 0); // Cria o primeiro PCB
+				tail = head; // O primeiro PCB é também o último
+			} else {
+				ProcessControlBlock newPCB = new ProcessControlBlock(tail.pid + 1, pageTable, 0);
+				tail.next = newPCB; // Adiciona o novo PCB à lista encadeada
+				tail = newPCB; // Atualiza o tail para o novo PCB
+			}
+			for (int i = 0; i < programSize; i++) {
+				int logicalAddress = i;
+				int pageNumber = logicalAddress / pageSize;
+				int offset = logicalAddress % pageSize;
+				int frameNumber = pageTable.get(pageNumber);
+				int physicalAddress = (frameNumber * pageSize) + offset;
+
+				if (physicalAddress >= 0 && physicalAddress < hw.mem.pos.length) {
+					hw.mem.pos[physicalAddress].opc = programa[i].opc;
+					hw.mem.pos[physicalAddress].ra = programa[i].ra;
+					hw.mem.pos[physicalAddress].rb = programa[i].rb;
+					hw.mem.pos[physicalAddress].p = programa[i].p;
+				} else {
+					System.err.println("UTILS: Erro ao carregar na posicao fisica: " + physicalAddress);
+					so.mm.desaloca(pageTable);
+					return false;
+				}
+			}
+			
+			this.aptos.add(tail);
+			
+
+			return true;
 		}
 		void desalocaProcesso(int pid){
-			return;
+			ProcessControlBlock current = head;
+			ProcessControlBlock previous = null;
+
+			while (current != null) {
+				if (current.pid == pid) {
+					if (previous == null) {
+						head = current.next; // Remove o primeiro PCB
+					} else {
+						previous.next = current.next; // Remove o PCB do meio ou do fim
+					}
+					this.aptos.remove(current); // caso o processo esteja na lista de aptos
+					so.mm.desaloca(current.pageTable); // Desaloca a memória do processo
+					System.out.println("GM: Processo " + pid + " desalocado.");
+
+					return;
+				}
+				previous = current;
+				current = current.next;
+			}
+			System.out.println("GM: Processo " + pid + " nao encontrado.");
 		} 
 	}
 
@@ -690,6 +766,7 @@ public class Sistema {
 		public SysCallHandling sc;
 		public Utilities utils;
 		public MemoryManagment mm;
+		public ProcessManagement gp;
 
 		public SO(HW hw) {
 			ih = new InterruptHandling(hw); // rotinas de tratamento de int
@@ -697,6 +774,7 @@ public class Sistema {
 			hw.cpu.setAddressOfHandlers(ih, sc);
 			utils = new Utilities(hw);
 			mm = new MemoryManagment(hw.mem.getSize(), hw.pageSize);
+			gp = new ProcessManagement(hw.cpu);
 		}
 	}
 	// -------------------------------------------------------------------------------------------------------
@@ -716,7 +794,13 @@ public class Sistema {
 
 	public void run() {
 
-		so.utils.loadAndExec(progs.retrieveProgram("fatorialV2"));
+		so.gp.criaProcesso(progs.retrieveProgram("fatorialV2"));
+		so.gp.exec(0); // Executa o processo com PID 0
+		so.gp.desalocaProcesso(0); // Desaloca o processo com PID 0
+
+
+
+		// so.utils.loadAndExec(progs.retrieveProgram("fatorialV2"));
 
 		// so.utils.loadAndExec(progs.retrieveProgram("fatorial"));
 		// fibonacci10,
