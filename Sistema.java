@@ -21,6 +21,7 @@
 //           em seguida solicita a execução de algum programa com  loadAndExec
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class Sistema {
 
@@ -115,6 +116,7 @@ public class Sistema {
 			reg = new int[10]; // aloca o espaço dos registradores - regs 8 e 9 usados somente para IO
 			debug = _debug; // se true, print da instrucao em execucao
 			pageSize = _pageSize;
+			pc = 0;
 		}
 
 		public void setAddressOfHandlers(InterruptHandling _ih, SysCallHandling _sysCall) {
@@ -146,14 +148,17 @@ public class Sistema {
 			return true;
 		}
 
-		public void setContext(int _pc, List<Integer> _page_table, int[] regs) { // usado para setar o contexto da cpu para rodar um
-																		// processo
+		public void setContext(int _pc, List<Integer> _page_table, int[] _regs) { // usado para setar o contexto da cpu
+																					// para rodar um
+			// processo
 			// [ nesta versao é somente colocar o PC na posicao 0 ]
 			pc = _pc; // pc cfe endereco logico
 			irpt = Interrupts.noInterrupt;
 			// reset da interrupcao registrada
 			this.page_table = _page_table;
-			this.reg = regs; // setar o contexto da CPU para o processo
+			System.arraycopy(_regs, 0, this.reg, 0, _regs.length);
+
+			cpuStop = false; // Ensure CPU is ready to run
 		}
 
 		private int translateAddress(int logicalAddress) {
@@ -167,6 +172,23 @@ public class Sistema {
 
 			int frameNumber = page_table.get(pageNumber);
 			return (frameNumber * pageSize) + offset;
+		}
+
+		public int getPC() {
+			return pc;
+		}
+
+		public int[] getRegs() {
+			// Return a copy to prevent external modification? Or return reference?
+			// For this assignment, returning reference is likely acceptable.
+			return reg;
+			// return Arrays.copyOf(reg, reg.length); // Safer option
+		}
+
+		// --- Setter for Trace Flag ---
+		public void setDebug(boolean _debug) {
+			this.debug = _debug;
+			System.out.println("CPU: Modo trace " + (this.debug ? "ativado." : "desativado."));
 		}
 
 		public void run() { // execucao da CPU supoe que o contexto da CPU, vide acima,
@@ -563,7 +585,8 @@ public class Sistema {
 				System.out.println("---------------------------------- programa carregado na memoria (paginada)");
 				dumpMemoryByPageTable(pageTable); // Dump apenas as paginas do programa
 
-				// hw.cpu.setContext(0, pageTable); // Seta pc para endereço 0 (lógico) e a tabela de páginas
+				// hw.cpu.setContext(0, pageTable); // Seta pc para endereço 0 (lógico) e a
+				// tabela de páginas
 				System.out.println("---------------------------------- inicia execucao ");
 				hw.cpu.run(); // cpu roda programa ate parar
 				System.out.println("---------------------------------- memoria após execucao ");
@@ -593,6 +616,7 @@ public class Sistema {
 			System.out.println("------------------------------------------------------------------");
 		}
 	}
+
 	public class Contexto {
 		public int[] regs; // registradores do processo
 		public int pc; // contador de programa do processo
@@ -603,12 +627,14 @@ public class Sistema {
 			this.pid = pid;
 			this.regs = new int[10]; // Inicializa os registradores do processo
 		}
+
 		public void set_state(int[] regs, int pc) {
 			this.regs = regs;
 			this.pc = pc;
 		}
 
 	}
+
 	public class ProcessControlBlock {
 		public int pid; // ID do processo
 		public List<Integer> pageTable; // Tabela de páginas do processo
@@ -624,94 +650,253 @@ public class Sistema {
 			this.contexto = new Contexto(pid); // Cria um novo contexto para o processo
 		}
 	}
+
 	public class ProcessManagement {
 
-		ProcessControlBlock head = null;
-		ProcessControlBlock tail = null;
-		ProcessControlBlock running = null; // PCB do processo em execução
-		// Lista de aptos
-		List<ProcessControlBlock> aptos = new ArrayList<>(); // Lista de processos aptos para execução
-		CPU cpu = null; // CPU associada ao sistema operacional
-		public ProcessManagement(CPU cpu) {
-			this.cpu = cpu;
+		private List<ProcessControlBlock> aptos; // Ready queue
+		private ProcessControlBlock running; // Currently running process PCB
+		private CPU cpu;
+		private MemoryManagment mm; // Need reference to Memory Manager
+		private Utilities utils; // Need reference to Utilities
+		private HW hw; // Need reference to HW for pageSize etc.
+
+		private static AtomicInteger nextPid = new AtomicInteger(0); // Unique PID generator
+
+		public ProcessManagement(CPU _cpu, MemoryManagment _mm, Utilities _utils, HW _hw) {
+			this.aptos = new LinkedList<>(); // Use LinkedList for efficient add/remove (like a queue)
+			this.running = null;
+			this.cpu = _cpu;
+			this.mm = _mm;
+			this.utils = _utils;
+			this.hw = _hw;
 		}
-		public void exec(int pid) {
-			for(ProcessControlBlock pcb : aptos) {
+
+		// 1. Create Process
+		// boolean criaProcesso( programa )
+		public boolean criaProcesso(Word[] programa, String programName) {
+			if (programa == null || programa.length == 0) {
+				System.out.println("GP: Erro - Programa invalido ou vazio.");
+				return false;
+			}
+
+			int programSize = programa.length;
+			System.out
+					.println("GP: Tentando criar processo para '" + programName + "' (" + programSize + " palavras).");
+
+			// Ask Memory Manager for allocation
+			List<Integer> pageTable = new ArrayList<>(); // Create a new list for this process's page table
+			if (!mm.aloca(programSize, pageTable)) {
+				System.out.println("GP: Falha ao criar processo - Memoria insuficiente.");
+				// mm.aloca should print its own error message
+				return false; // Allocation failed
+			}
+			System.out.println("GP: Memoria alocada com sucesso. Tabela de Paginas: " + pageTable);
+
+			// Create PCB
+			int pid = nextPid.getAndIncrement(); // Get unique PID
+			ProcessControlBlock newPCB = new ProcessControlBlock(pid, pageTable, programName);
+			// PC=0 and registers are initialized in Contexto constructor
+
+			// Load program into allocated memory using the page table
+			if (!utils.loadProgramToMemory(programa, pageTable)) {
+				System.err.println(
+						"GP: Falha ao carregar o programa na memoria para PID " + pid + ". Desalocando memoria.");
+				mm.desaloca(pageTable); // Clean up allocated memory
+				// Don't increment PID again if creation fails here? Maybe revert PID counter?
+				// For now, PID is consumed.
+				return false;
+			}
+			System.out.println("GP: Programa carregado na memoria para PID " + pid);
+
+			// Add PCB to the ready queue
+			aptos.add(newPCB);
+			System.out.println("GP: Processo '" + programName + "' criado com sucesso. PID: " + pid
+					+ ". Adicionado a fila de aptos.");
+
+			return true;
+		}
+
+		// 2. Deallocate Process
+		// desalocaProcesso (id)
+		public void desalocaProcesso(int pid) {
+			System.out.println("GP: Tentando desalocar processo PID: " + pid);
+			// Check if it's the running process
+			if (running != null && running.pid == pid) {
+				System.out.println("GP: Desalocando processo em execucao (PID: " + pid + ").");
+				mm.desaloca(running.pageTable); // Deallocate memory
+				running = null; // Set running to null
+				// Note: CPU context is lost. If preemptive multitasking existed, context saving
+				// would be crucial here.
+				System.out.println("GP: Processo " + pid + " (em execucao) desalocado.");
+				return;
+			}
+
+			// Search in the ready queue (aptos)
+			Iterator<ProcessControlBlock> iterator = aptos.iterator();
+			while (iterator.hasNext()) {
+				ProcessControlBlock pcb = iterator.next();
 				if (pcb.pid == pid) {
-					running = pcb; // Define o PCB como o processo em execução
-					pcb.isRunning = true; // Marca o processo como em execução
-					cpu.setContext(pcb.contexto.pc, pcb.pageTable, pcb.contexto.regs); // Seta o contexto da CPU para o processo	
-					cpu.run();
+					System.out.println("GP: Desalocando processo na fila de aptos (PID: " + pid + ").");
+					iterator.remove(); // Remove from ready queue
+					mm.desaloca(pcb.pageTable); // Deallocate memory
+					System.out.println("GP: Processo " + pid + " (apto) desalocado.");
+					return;
+				}
+			}
+
+			// If not found running or ready
+			System.out.println("GP: Processo PID " + pid + " nao encontrado para desalocacao.");
+		}
+
+		// Execute Process (simple version: run until stop/interrupt)
+		// exec <id>
+		public void exec(int pid) {
+			if (running != null) {
+				System.out.println("GP: Erro - Ja existe um processo em execucao (PID: " + running.pid + "). Use 'rm "
+						+ running.pid + "' primeiro se necessario.");
+				return;
+			}
+
+			// Find the process in the ready queue
+			ProcessControlBlock pcbToRun = null;
+			Iterator<ProcessControlBlock> iterator = aptos.iterator();
+			while (iterator.hasNext()) {
+				ProcessControlBlock pcb = iterator.next();
+				if (pcb.pid == pid) {
+					pcbToRun = pcb;
+					iterator.remove(); // Remove from ready queue
 					break;
 				}
 			}
 
-		}
+			if (pcbToRun != null) {
+				System.out.println("-----------------------------------------------------");
+				System.out.println(
+						"GP: Iniciando execucao do processo PID: " + pid + " ('" + pcbToRun.programName + "')");
+				running = pcbToRun; // Set as the running process
 
-		boolean criaProcesso(Word[] programa){
-			int programSize = programa.length;
-			List<Integer> pageTable = new ArrayList<>();
-			int pageSize = hw.pageSize;
+				// Set CPU context from PCB
+				cpu.setContext(running.contexto.pc, running.pageTable, running.contexto.regs);
 
-			if (!so.mm.aloca(programSize, pageTable)){
-				System.out.println("GM: Nao ha frames suficientes para alocar o programa.");
-				return false;
-			}
-			if (head == null) {
-				head = new ProcessControlBlock(0, pageTable, 0); // Cria o primeiro PCB
-				tail = head; // O primeiro PCB é também o último
+				// Run the CPU
+				cpu.run(); // Executes instructions until cpuStop is true (STOP, interrupt, error)
+
+				// After CPU stops (for whatever reason)
+				System.out.println("GP: Execucao do processo PID: " + pid + " terminada.");
+
+				// Save the final context back to the PCB (important!)
+				running.contexto.pc = cpu.getPC();
+				// Copy registers back - be careful if getRegs returns a reference vs copy
+				System.arraycopy(cpu.getRegs(), 0, running.contexto.regs, 0, running.contexto.regs.length);
+
+				// Decide what to do with the process now.
+				// Simple model: Assume it finished or hit an error. It's no longer running.
+				// It doesn't automatically go back to ready queue. Requires 'rm' or another
+				// 'exec'.
+				// (A real scheduler would handle state transitions like Ready -> Running ->
+				// Blocked -> Ready etc.)
+				System.out.println("GP: Contexto final salvo para PID " + pid + " (PC=" + running.contexto.pc + ")");
+				// Add process back to ready queue? Optional based on desired behavior.
+				// aptos.add(running); // Uncomment if process should return to ready after
+				// running once
+
+				running = null; // Set running process to null
+				System.out.println("-----------------------------------------------------");
+
 			} else {
-				ProcessControlBlock newPCB = new ProcessControlBlock(tail.pid + 1, pageTable, 0);
-				tail.next = newPCB; // Adiciona o novo PCB à lista encadeada
-				tail = newPCB; // Atualiza o tail para o novo PCB
+				System.out.println("GP: Processo PID " + pid + " nao encontrado na fila de aptos para execucao.");
 			}
-			for (int i = 0; i < programSize; i++) {
-				int logicalAddress = i;
-				int pageNumber = logicalAddress / pageSize;
-				int offset = logicalAddress % pageSize;
-				int frameNumber = pageTable.get(pageNumber);
-				int physicalAddress = (frameNumber * pageSize) + offset;
-
-				if (physicalAddress >= 0 && physicalAddress < hw.mem.pos.length) {
-					hw.mem.pos[physicalAddress].opc = programa[i].opc;
-					hw.mem.pos[physicalAddress].ra = programa[i].ra;
-					hw.mem.pos[physicalAddress].rb = programa[i].rb;
-					hw.mem.pos[physicalAddress].p = programa[i].p;
-				} else {
-					System.err.println("UTILS: Erro ao carregar na posicao fisica: " + physicalAddress);
-					so.mm.desaloca(pageTable);
-					return false;
-				}
-			}
-			
-			this.aptos.add(tail);
-			
-
-			return true;
 		}
-		void desalocaProcesso(int pid){
-			ProcessControlBlock current = head;
-			ProcessControlBlock previous = null;
 
-			while (current != null) {
-				if (current.pid == pid) {
-					if (previous == null) {
-						head = current.next; // Remove o primeiro PCB
-					} else {
-						previous.next = current.next; // Remove o PCB do meio ou do fim
-					}
-					this.aptos.remove(current); // caso o processo esteja na lista de aptos
-					so.mm.desaloca(current.pageTable); // Desaloca a memória do processo
-					System.out.println("GM: Processo " + pid + " desalocado.");
-
-					return;
-				}
-				previous = current;
-				current = current.next;
+		// List Processes
+		// ps
+		public void listProcesses() {
+			System.out.println("--- Lista de Processos Ativos ---");
+			boolean found = false;
+			if (running != null) {
+				System.out.println("  PID: " + running.pid + "\t Nome: '" + running.programName
+						+ "' \t Estado: Running \t PC: " + running.contexto.pc);
+				found = true;
 			}
-			System.out.println("GM: Processo " + pid + " nao encontrado.");
-		} 
-	}
+			if (!aptos.isEmpty()) {
+				System.out.println("--- Fila de Aptos ---");
+				for (ProcessControlBlock pcb : aptos) {
+					System.out.println("  PID: " + pcb.pid + "\t Nome: '" + pcb.programName
+							+ "' \t Estado: Ready \t PC: " + pcb.contexto.pc);
+				}
+				found = true;
+			}
+
+			if (!found) {
+				System.out.println("  Nenhum processo ativo no sistema.");
+			}
+			System.out.println("---------------------------------");
+		}
+
+		// Dump Process Info
+		// dump <id>
+		public void dumpProcess(int pid) {
+			ProcessControlBlock pcbToDump = null;
+
+			// Check if it's the running process
+			if (running != null && running.pid == pid) {
+				pcbToDump = running;
+				System.out.println("--- Dump do Processo (Running) PID: " + pid + " ---");
+			} else {
+				// Search in the ready queue
+				for (ProcessControlBlock pcb : aptos) {
+					if (pcb.pid == pid) {
+						pcbToDump = pcb;
+						System.out.println("--- Dump do Processo (Ready) PID: " + pid + " ---");
+						break;
+					}
+				}
+			}
+
+			if (pcbToDump != null) {
+				System.out.println("Nome do Programa: '" + pcbToDump.programName + "'");
+				System.out.println("Estado: " + (pcbToDump == running ? "Running" : "Ready"));
+				System.out.println("Program Counter (PC): " + pcbToDump.contexto.pc);
+				System.out.print("Registradores: ");
+				if (pcbToDump.contexto.regs != null) {
+					for (int i = 0; i < pcbToDump.contexto.regs.length; i++) {
+						System.out.print("R" + i + "=" + pcbToDump.contexto.regs[i]
+								+ (i == pcbToDump.contexto.regs.length - 1 ? "" : " | "));
+					}
+					System.out.println();
+				} else {
+					System.out.println("N/A");
+				}
+				System.out.println("Tabela de Páginas (Frame Numbers): "
+						+ (pcbToDump.pageTable != null ? pcbToDump.pageTable.toString() : "N/A"));
+
+				// Dump the actual memory content for this process
+				if (pcbToDump.pageTable != null) {
+					utils.dumpMemoryForProcess(pcbToDump.pageTable);
+				} else {
+					System.out.println("Nao foi possivel fazer dump da memoria (tabela de paginas invalida).");
+				}
+				System.out.println("-------------------------------------------");
+
+			} else {
+				System.out.println("GP: Processo PID " + pid + " nao encontrado para dump.");
+			}
+		}
+
+		// Helper to find a PCB (used internally or could be public)
+		public ProcessControlBlock findPCB(int pid) {
+			if (running != null && running.pid == pid) {
+				return running;
+			}
+			for (ProcessControlBlock pcb : aptos) {
+				if (pcb.pid == pid) {
+					return pcb;
+				}
+			}
+			return null;
+		}
+
+	} // --- Fim do ProcessManagement ---
 
 	public class MemoryManagment {
 		private HashSet<Integer> free_set; // Start pos in memory
@@ -800,8 +985,6 @@ public class Sistema {
 		so.gp.criaProcesso(progs.retrieveProgram("fatorialV2"));
 		so.gp.exec(0); // Executa o processo com PID 0
 		so.gp.desalocaProcesso(0); // Desaloca o processo com PID 0
-
-
 
 		// so.utils.loadAndExec(progs.retrieveProgram("fatorialV2"));
 
