@@ -1,46 +1,18 @@
-// PUCRS - Escola Politécnica - Sistemas Operacionais
-// Prof. Fernando Dotti
-// Código fornecido como parte da solução do projeto de Sistemas Operacionais
-//
-// Estrutura deste código:
-//    Todo código está dentro da classe *Sistema*
-//    Dentro de Sistema, encontra-se acima a definição de HW:
-//           Memory,  Word, 
-//           CPU tem Opcodes (codigos de operacoes suportadas na cpu),
-//               e Interrupcoes possíveis, define o que executa para cada instrucao
-//           VM -  a máquina virtual é uma instanciação de CPU e Memória
-//    Depois as definições de SW:
-//           no momento são esqueletos (so estrutura) para
-//					InterruptHandling    e
-//					SysCallHandling 
-//    A seguir temos utilitários para usar o sistema
-//           carga, início de execução e dump de memória
-//    Por último os programas existentes, que podem ser copiados em memória.
-//           Isto representa programas armazenados.
-//    Veja o main.  Ele instancia o Sistema com os elementos mencionados acima.
-//           em seguida solicita a execução de algum programa com  loadAndExec
-
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger; // For thread-safe PID generation if needed, otherwise simple int is fine for this model
+import java.lang.Math; // For Math.ceil
 
 public class Sistema {
 
-	// -------------------------------------------------------------------------------------------------------
-	// --------------------- H A R D W A R E - definicoes de HW
-	// ----------------------------------------------
-
-	// -------------------------------------------------------------------------------------------------------
-	// --------------------- M E M O R I A - definicoes de palavra de memoria,
-	// memória ----------------------
-
+	// ... (Memory, Word, Opcode, Interrupts remain the same) ...
 	public class Memory {
-		public Word[] pos; // pos[i] é a posição i da memória. cada posição é uma palavra.
+		public Word[] pos;
 
 		public Memory(int size) {
 			pos = new Word[size];
 			for (int i = 0; i < pos.length; i++) {
 				pos[i] = new Word(Opcode.___, -1, -1, -1);
 			}
-			; // cada posicao da memoria inicializada
 		}
 
 		public int getSize() {
@@ -48,13 +20,13 @@ public class Sistema {
 		}
 	}
 
-	public class Word { // cada posicao da memoria tem uma instrucao (ou um dado)
+	public class Word {
 		public Opcode opc; //
-		public int ra; // indice do primeiro registrador da operacao (Rs ou Rd cfe opcode na tabela)
-		public int rb; // indice do segundo registrador da operacao (Rc ou Rs cfe operacao)
-		public int p; // parametro para instrucao (k ou A cfe operacao), ou o dado, se opcode = DADO
+		public int ra;
+		public int rb;
+		public int p;
 
-		public Word(Opcode _opc, int _ra, int _rb, int _p) { // vide definição da VM - colunas vermelhas da tabela
+		public Word(Opcode _opc, int _ra, int _rb, int _p) {
 			opc = _opc;
 			ra = _ra;
 			rb = _rb;
@@ -62,358 +34,409 @@ public class Sistema {
 		}
 	}
 
-	// -------------------------------------------------------------------------------------------------------
-	// --------------------- C P U - definicoes da CPU
-	// -----------------------------------------------------
-
 	public enum Opcode {
-		DATA, ___, // se memoria nesta posicao tem um dado, usa DATA, se nao usada ee NULO ___
-		JMP, JMPI, JMPIG, JMPIL, JMPIE, // desvios
+		DATA, ___,
+		JMP, JMPI, JMPIG, JMPIL, JMPIE,
 		JMPIM, JMPIGM, JMPILM, JMPIEM,
 		JMPIGK, JMPILK, JMPIEK, JMPIGT,
-		ADDI, SUBI, ADD, SUB, MULT, // matematicos
-		LDI, LDD, STD, LDX, STX, MOVE, // movimentacao
-		SYSCALL, STOP // chamada de sistema e parada
+		ADDI, SUBI, ADD, SUB, MULT,
+		LDI, LDD, STD, LDX, STX, MOVE,
+		SYSCALL, STOP
 	}
 
-	public enum Interrupts { // possiveis interrupcoes que esta CPU gera
+	public enum Interrupts {
 		noInterrupt, intEnderecoInvalido, intInstrucaoInvalida, intOverflow, intSTOP;
 	}
 
 	public class CPU {
-		private int maxInt; // valores maximo e minimo para inteiros nesta cpu
+		private int maxInt;
 		private int minInt;
-		// CONTEXTO da CPU ...
-		private int pc; // ... composto de program counter,
-		private Word ir; // instruction register,
-		private int[] reg; // registradores da CPU
-		private Interrupts irpt; // durante instrucao, interrupcao pode ser sinalizada
-		// FIM CONTEXTO DA CPU: tudo que precisa sobre o estado de um processo para
-		// executa-lo
-		// nas proximas versoes isto pode modificar
 
-		private Word[] m; // m é o array de memória "física", CPU tem uma ref a m para acessar
-		private List<Integer> page_table; // O sistema operacional vai setar a page table quando setar o contexto de
-											// execucao
+		private int pc;
+		private Word ir;
+		private int[] reg;
+		private Interrupts irpt;
+
+		private Word[] m; // Physical memory reference
+		private List<Integer> page_table; // Current process's page table
+
 		private int pageSize;
 
-		private InterruptHandling ih; // significa desvio para rotinas de tratamento de Int - se int ligada, desvia
-		private SysCallHandling sysCall; // significa desvio para tratamento de chamadas de sistema
+		private InterruptHandling ih;
+		private SysCallHandling sysCall;
 
-		private boolean cpuStop; // flag para parar CPU - caso de interrupcao que acaba o processo, ou chamada
-									// stop -
-									// nesta versao acaba o sistema no fim do prog
+		private boolean cpuStop; // Control flag for stopping execution
 
-		// auxilio aa depuração
-		private boolean debug; // se true entao mostra cada instrucao em execucao
-		private Utilities u; // para debug (dump)
+		private boolean debug; // Trace flag
+		private Utilities u;
 
-		public CPU(Memory _mem, boolean _debug, int _pageSize) { // ref a MEMORIA passada na criacao da CPU
-			maxInt = 32767; // capacidade de representacao modelada
-			minInt = -32767; // se exceder deve gerar interrupcao de overflow
-			m = _mem.pos; // usa o atributo 'm' para acessar a memoria, só para ficar mais pratico
-			reg = new int[10]; // aloca o espaço dos registradores - regs 8 e 9 usados somente para IO
-			debug = _debug; // se true, print da instrucao em execucao
+		public CPU(Memory _mem, boolean _debug, int _pageSize) {
+			maxInt = 32767;
+			minInt = -32767;
+			m = _mem.pos;
+			reg = new int[10]; // Initialize registers
+			debug = _debug;
 			pageSize = _pageSize;
+			pc = 0; // Initialize PC
+			irpt = Interrupts.noInterrupt;
 		}
 
 		public void setAddressOfHandlers(InterruptHandling _ih, SysCallHandling _sysCall) {
-			ih = _ih; // aponta para rotinas de tratamento de int
-			sysCall = _sysCall; // aponta para rotinas de tratamento de chamadas de sistema
+			ih = _ih;
+			sysCall = _sysCall;
 		}
 
 		public void setUtilities(Utilities _u) {
-			u = _u; // aponta para rotinas utilitárias - fazer dump da memória na tela
+			u = _u;
 		}
 
-		// verificação de enderecamento FISICO
-		private boolean legal(int e) { // todo acesso a memoria tem que ser verificado se é válido -
-										// aqui no caso se o endereco é um endereco valido em toda memoria
+		// Check physical address validity
+		private boolean legal(int e) {
 			if (e >= 0 && e < m.length) {
 				return true;
 			} else {
-				irpt = Interrupts.intEnderecoInvalido; // se nao for liga interrupcao no meio da exec da instrucao
+				irpt = Interrupts.intEnderecoInvalido;
+				System.err.println(">>> ERRO: Endereco fisico invalido: " + e);
 				return false;
 			}
 		}
 
-		private boolean testOverflow(int v) { // toda operacao matematica deve avaliar se ocorre overflow
+		private boolean testOverflow(int v) {
 			if ((v < minInt) || (v > maxInt)) {
-				irpt = Interrupts.intOverflow; // se houver liga interrupcao no meio da exec da instrucao
+				irpt = Interrupts.intOverflow;
+				System.err.println(">>> ERRO: Overflow com valor: " + v);
 				return false;
 			}
-			;
 			return true;
 		}
 
-		public void setContext(int _pc, List<Integer> _page_table, int[] regs) { // usado para setar o contexto da cpu para rodar um
-																		// processo
-			// [ nesta versao é somente colocar o PC na posicao 0 ]
-			pc = _pc; // pc cfe endereco logico
-			irpt = Interrupts.noInterrupt;
-			// reset da interrupcao registrada
-			this.page_table = _page_table;
-			this.reg = regs; // setar o contexto da CPU para o processo
+		// Set CPU context for a specific process
+		public void setContext(int _pc, List<Integer> _page_table, int[] _regs) {
+			pc = _pc;
+			page_table = _page_table;
+			// Copy registers to prevent aliasing issues if needed, but direct assignment is
+			// simpler here
+			System.arraycopy(_regs, 0, this.reg, 0, _regs.length);
+			irpt = Interrupts.noInterrupt; // Reset interrupt flag for new execution context
+			cpuStop = false; // Ensure CPU is ready to run
 		}
 
+		// Translate logical address to physical address using the current page table
 		private int translateAddress(int logicalAddress) {
+			if (page_table == null) {
+				System.err.println(">>> ERRO: Tentativa de traducao sem tabela de paginas carregada!");
+				irpt = Interrupts.intEnderecoInvalido;
+				return -1;
+			}
 			int pageNumber = logicalAddress / pageSize;
 			int offset = logicalAddress % pageSize;
 
-			if (pageNumber >= page_table.size() || page_table.get(pageNumber) == null) {
+			// Check if page number is valid within the table
+			if (pageNumber < 0 || pageNumber >= page_table.size() || page_table.get(pageNumber) == null) {
+				System.err.println(">>> ERRO: Endereco logico " + logicalAddress + " (pagina " + pageNumber
+						+ ") fora dos limites da tabela ou pagina nao mapeada.");
 				irpt = Interrupts.intEnderecoInvalido;
-				return -1; // Indica endereço inválido
+				return -1;
 			}
 
 			int frameNumber = page_table.get(pageNumber);
-			return (frameNumber * pageSize) + offset;
+			int physicalAddress = (frameNumber * pageSize) + offset;
+
+			// Optional: Double check physical address range (should be handled by 'legal'
+			// anyway)
+			// if (physicalAddress < 0 || physicalAddress >= m.length) {
+			// System.err.println(">>> ERRO: Endereco fisico calculado " + physicalAddress +
+			// " fora dos limites da memoria.");
+			// irpt = Interrupts.intEnderecoInvalido;
+			// return -1;
+			// }
+
+			return physicalAddress;
 		}
 
-		public void run() { // execucao da CPU supoe que o contexto da CPU, vide acima,
-							// esta devidamente setado
-			cpuStop = false;
-			while (!cpuStop) { // ciclo de instrucoes. acaba cfe resultado da exec da instrucao, veja cada
-								// caso.
+		// --- Getters for Context Saving ---
+		public int getPC() {
+			return pc;
+		}
 
-				// --------------------------------------------------------------------------------------------------
-				// FASE DE FETCH
+		public int[] getRegs() {
+			// Return a copy to prevent external modification? Or return reference?
+			// For this assignment, returning reference is likely acceptable.
+			return reg;
+			// return Arrays.copyOf(reg, reg.length); // Safer option
+		}
 
+		// --- Setter for Trace Flag ---
+		public void setDebug(boolean _debug) {
+			this.debug = _debug;
+			System.out.println("CPU: Modo trace " + (this.debug ? "ativado." : "desativado."));
+		}
+
+		public void run() {
+			cpuStop = false; // Reset stop flag before starting/resuming
+			while (!cpuStop) {
+				// 1. Fetch Instruction (translate PC)
 				int physicalPC = translateAddress(pc);
+				if (irpt != Interrupts.noInterrupt) { // Check if translation failed
+					System.err.println("CPU: Falha ao traduzir PC logico " + pc);
+					break; // Stop execution if PC translation fails
+				}
 
-				if (legal(physicalPC)) { // pc valido FISICO
-					ir = m[physicalPC]; // <<<<<<<<<<<< AQUI faz FETCH - busca posicao da memoria apontada por pc,
-					if (irpt != Interrupts.noInterrupt)
+				if (!legal(physicalPC)) { // Check if physical PC is valid
+					System.err.println("CPU: PC Fisico Invalido: " + physicalPC);
+					// irpt is set by legal()
+					break; // Stop execution
+				}
+
+				ir = m[physicalPC]; // Fetch instruction word
+
+				// --- Debug Output ---
+				if (debug) {
+					System.out.print("  CPU State: PC_log=" + pc + " PC_fis=" + physicalPC + " IR=[" + ir.opc + ","
+							+ ir.ra + "," + ir.rb + "," + ir.p + "] ");
+					System.out.print(" Regs=[");
+					for (int i = 0; i < reg.length; i++) {
+						System.out.print("r" + i + ":" + reg[i] + (i == reg.length - 1 ? "" : ","));
+					}
+					System.out.println("]");
+				}
+
+				// 2. Decode and Execute Instruction
+				switch (ir.opc) {
+					case LDI:
+						reg[ir.ra] = ir.p;
+						pc++;
+						break;
+					case LDD: {
+						int logicalAddress = ir.p;
+						int physicalAddress = translateAddress(logicalAddress);
+						if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
+							if (m[physicalAddress].opc == Opcode.DATA) { // Ensure it's data
+								reg[ir.ra] = m[physicalAddress].p;
+								pc++;
+							} else {
+								System.err.println(">>> ERRO: LDD tentando ler de posicao de codigo em end logico "
+										+ logicalAddress);
+								irpt = Interrupts.intInstrucaoInvalida; // Or address invalid? Let's use instruction
+																		// invalid
+							}
+						}
+						break; // Break here, error handled by interrupt check later
+					}
+					case LDX: {
+						int logicalAddress = reg[ir.rb]; // Address is in register rb
+						int physicalAddress = translateAddress(logicalAddress);
+						if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
+							if (m[physicalAddress].opc == Opcode.DATA) { // Ensure it's data
+								reg[ir.ra] = m[physicalAddress].p;
+								pc++;
+							} else {
+								System.err.println(">>> ERRO: LDX tentando ler de posicao de codigo em end logico "
+										+ logicalAddress);
+								irpt = Interrupts.intInstrucaoInvalida;
+							}
+						}
+						break;
+					}
+					case STD: {
+						int logicalAddress = ir.p;
+						int physicalAddress = translateAddress(logicalAddress);
+						if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
+							m[physicalAddress].opc = Opcode.DATA; // Mark as data
+							m[physicalAddress].p = reg[ir.ra];
+							pc++;
+							if (debug) {
+								System.out.print("        STD M[" + physicalAddress + "] <- " + reg[ir.ra] + " ");
+								u.dump(m[physicalAddress]); // Dump the specific word changed
+							}
+						}
+						break;
+					}
+					case STX: {
+						int logicalAddress = reg[ir.rb]; // Address is in register rb
+						int physicalAddress = translateAddress(logicalAddress);
+						if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
+							m[physicalAddress].opc = Opcode.DATA; // Mark as data
+							m[physicalAddress].p = reg[ir.ra]; // Value is in register ra
+							pc++;
+							if (debug) {
+								System.out.print("        STX M[" + physicalAddress + "] <- " + reg[ir.ra] + " ");
+								u.dump(m[physicalAddress]);
+							}
+						}
+						break;
+					}
+					case MOVE: // Assuming MOVE Rx, Ry -> Rx = Ry
+						reg[ir.ra] = reg[ir.rb];
+						pc++;
 						break;
 
-					if (debug) {
-						System.out.print("                                              regs: ");
-						for (int i = 0; i < 10; i++) {
-							System.out.print(" r[" + i + "]:" + reg[i]);
+					// Arithmetic
+					case ADD:
+						reg[ir.ra] = reg[ir.ra] + reg[ir.rb];
+						testOverflow(reg[ir.ra]);
+						pc++;
+						break;
+					case ADDI:
+						reg[ir.ra] = reg[ir.ra] + ir.p;
+						testOverflow(reg[ir.ra]);
+						pc++;
+						break;
+					case SUB:
+						reg[ir.ra] = reg[ir.ra] - reg[ir.rb];
+						testOverflow(reg[ir.ra]);
+						pc++;
+						break;
+					case SUBI:
+						reg[ir.ra] = reg[ir.ra] - ir.p;
+						testOverflow(reg[ir.ra]);
+						pc++;
+						break;
+					case MULT:
+						reg[ir.ra] = reg[ir.ra] * reg[ir.rb];
+						testOverflow(reg[ir.ra]);
+						pc++;
+						break;
+
+					// Jumps (update PC only, address translation happens at fetch)
+					case JMP: // Jump to logical address P
+						pc = ir.p;
+						break;
+					case JMPI: // Jump to logical address in Ra
+						pc = reg[ir.ra];
+						break;
+					case JMPIG: // Jump to logical address in Ra if Rb > 0
+						if (reg[ir.rb] > 0) {
+							pc = reg[ir.ra];
+						} else {
+							pc++;
 						}
-						;
-						System.out.println();
+						break;
+					case JMPIL: // Jump to logical address in Ra if Rb < 0
+						if (reg[ir.rb] < 0) {
+							pc = reg[ir.ra];
+						} else {
+							pc++;
+						}
+						break;
+					case JMPIE: // Jump to logical address in Ra if Rb == 0
+						if (reg[ir.rb] == 0) {
+							pc = reg[ir.ra];
+						} else {
+							pc++;
+						}
+						break;
+
+					case JMPIM: { // Jump to logical address stored at logical address P
+						int logicalAddress = ir.p;
+						int physicalAddress = translateAddress(logicalAddress);
+						if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
+							pc = m[physicalAddress].p; // The new PC is the value at M[physicalAddress]
+						}
+						break; // Error handled by interrupt check
 					}
-					if (debug) {
-						System.out.print("                      pc: " + pc + "       exec: ");
-						u.dump(ir);
+					case JMPIGM: { // Jump to logical address stored at logical address P if Rb > 0
+						if (reg[ir.rb] > 0) {
+							int logicalAddress = ir.p;
+							int physicalAddress = translateAddress(logicalAddress);
+							if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
+								pc = m[physicalAddress].p;
+							}
+							// If translation/legality fails, irpt is set, loop will check
+						} else {
+							pc++;
+						}
+						break;
+					}
+					case JMPILM: { // Jump to logical address stored at logical address P if Rb < 0
+						if (reg[ir.rb] < 0) {
+							int logicalAddress = ir.p;
+							int physicalAddress = translateAddress(logicalAddress);
+							if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
+								pc = m[physicalAddress].p;
+							}
+						} else {
+							pc++;
+						}
+						break;
+					}
+					case JMPIEM: { // Jump to logical address stored at logical address P if Rb == 0
+						if (reg[ir.rb] == 0) {
+							int logicalAddress = ir.p;
+							int physicalAddress = translateAddress(logicalAddress);
+							if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
+								pc = m[physicalAddress].p;
+							}
+						} else {
+							pc++;
+						}
+						break;
 					}
 
-					// --------------------------------------------------------------------------------------------------
-					// FASE DE EXECUCAO DA INSTRUCAO CARREGADA NO ir
-					switch (ir.opc) { // conforme o opcode (código de operação) executa
-
-						// Instrucoes de Busca e Armazenamento em Memoria
-						case LDI: // Rd ← k veja a tabela de instrucoes do HW simulado para entender a semantica
-									// da instrucao
-							reg[ir.ra] = ir.p;
-							pc++;
-							break;
-						case LDD: // Rd <- [A]
-							int physicalAddressLDD = translateAddress(ir.p);
-							if (irpt != Interrupts.noInterrupt)
-								break;
-							if (legal(physicalAddressLDD)) {
-								reg[ir.ra] = m[physicalAddressLDD].p;
-								pc++;
-							}
-							break;
-						case LDX: // RD <- [RS] // NOVA
-							int physicalAddressLDX = translateAddress(reg[ir.rb]);
-							if (irpt != Interrupts.noInterrupt)
-								break;
-							if (legal(physicalAddressLDX)) {
-								reg[ir.ra] = m[physicalAddressLDX].p;
-								pc++;
-							}
-							break;
-						case STD: // [A] ← Rs
-							int physicalAddressSTD = translateAddress(ir.p);
-							if (irpt != Interrupts.noInterrupt)
-								break;
-							if (legal(physicalAddressSTD)) {
-								m[physicalAddressSTD].opc = Opcode.DATA;
-								m[physicalAddressSTD].p = reg[ir.ra];
-								pc++;
-								if (debug) {
-									System.out.print("                                  ");
-									u.dump(physicalAddressSTD, physicalAddressSTD + 1);
-								}
-							}
-							break;
-						case STX: // [Rd] ←Rs
-							int physicalAddressSTX = translateAddress(reg[ir.ra]);
-							if (irpt != Interrupts.noInterrupt)
-								break;
-							if (legal(physicalAddressSTX)) {
-								m[physicalAddressSTX].opc = Opcode.DATA;
-								m[physicalAddressSTX].p = reg[ir.rb];
-								pc++;
-							}
-							;
-							break;
-						case MOVE: // RD <- RS
-							reg[ir.ra] = reg[ir.rb];
-							pc++;
-							break;
-						// Instrucoes Aritmeticas
-						case ADD: // Rd ← Rd + Rs
-							reg[ir.ra] = reg[ir.ra] + reg[ir.rb];
-							testOverflow(reg[ir.ra]);
-							pc++;
-							break;
-						case ADDI: // Rd ← Rd + k
-							reg[ir.ra] = reg[ir.ra] + ir.p;
-							testOverflow(reg[ir.ra]);
-							pc++;
-							break;
-						case SUB: // Rd ← Rd - Rs
-							reg[ir.ra] = reg[ir.ra] - reg[ir.rb];
-							testOverflow(reg[ir.ra]);
-							pc++;
-							break;
-						case SUBI: // RD <- RD - k // NOVA
-							reg[ir.ra] = reg[ir.ra] - ir.p;
-							testOverflow(reg[ir.ra]);
-							pc++;
-							break;
-						case MULT: // Rd <- Rd * Rs
-							reg[ir.ra] = reg[ir.ra] * reg[ir.rb];
-							testOverflow(reg[ir.ra]);
-							pc++;
-							break;
-
-						// Instrucoes JUMP
-						case JMP: // PC <- k
+					// Conditional jumps to constant logical address P
+					case JMPIGK: // Jump to logical address P if Rb > 0
+						if (reg[ir.rb] > 0) {
 							pc = ir.p;
-							break;
-						case JMPIM: // PC <- [A]
-							int physicalAddressJMPIM = translateAddress(ir.p);
-							if (irpt != Interrupts.noInterrupt)
-								break;
-							if (legal(physicalAddressJMPIM)) {
-								pc = m[physicalAddressJMPIM].p;
-							}
-							break;
-						case JMPIG: // If Rc > 0 Then PC ← Rs Else PC ← PC +1
-							if (reg[ir.rb] > 0) {
-								pc = reg[ir.ra];
-							} else {
-								pc++;
-							}
-							break;
-						case JMPIGK: // If RC > 0 then PC <- k else PC++
-							if (reg[ir.rb] > 0) {
-								pc = ir.p;
-							} else {
-								pc++;
-							}
-							break;
-						case JMPILK: // If RC < 0 then PC <- k else PC++
-							if (reg[ir.rb] < 0) {
-								pc = ir.p;
-							} else {
-								pc++;
-							}
-							break;
-						case JMPIEK: // If RC = 0 then PC <- k else PC++
-							if (reg[ir.rb] == 0) {
-								pc = ir.p;
-							} else {
-								pc++;
-							}
-							break;
-						case JMPIL: // if Rc < 0 then PC <- Rs Else PC <- PC +1
-							if (reg[ir.rb] < 0) {
-								pc = reg[ir.ra];
-							} else {
-								pc++;
-							}
-							break;
-						case JMPIE: // If Rc = 0 Then PC <- Rs Else PC <- PC +1
-							if (reg[ir.rb] == 0) {
-								pc = reg[ir.ra];
-							} else {
-								pc++;
-							}
-							break;
-						case JMPIGM: // If RC > 0 then PC <- [A] else PC++
-							if (legal(ir.p)) {
-								if (reg[ir.rb] > 0) {
-									pc = m[ir.p].p;
-								} else {
-									pc++;
-								}
-							}
-							break;
-						case JMPILM: // If RC < 0 then PC <- k else PC++
-							int physicalAddressJMPILM = translateAddress(ir.p);
-							if (irpt != Interrupts.noInterrupt)
-								break;
-							if (legal(physicalAddressJMPILM)) {
-								if (reg[ir.rb] < 0) {
-									pc = m[physicalAddressJMPILM].p;
-								} else {
-									pc++;
-								}
-							}
-							break;
-						case JMPIEM: // If RC = 0 then PC <- k else PC++
-							int physicalAddressJMPIEM = translateAddress(ir.p);
-							if (irpt != Interrupts.noInterrupt)
-								break;
-							if (legal(physicalAddressJMPIEM)) {
-								if (reg[ir.rb] == 0) {
-									pc = m[physicalAddressJMPIEM].p;
-								} else {
-									pc++;
-								}
-							}
-							break;
-						case JMPIGT: // If RS>RC then PC <- k else PC++
-							if (reg[ir.ra] > reg[ir.rb]) {
-								pc = ir.p;
-							} else {
-								pc++;
-							}
-							break;
-
-						case DATA: // pc está sobre área supostamente de dados
-							irpt = Interrupts.intInstrucaoInvalida;
-							break;
-
-						// Chamadas de sistema
-						case SYSCALL:
-							sysCall.handle(); // <<<<< aqui desvia para rotina de chamada de sistema, no momento so
-												// temos IO
+						} else {
 							pc++;
-							break;
+						}
+						break;
+					case JMPILK: // Jump to logical address P if Rb < 0
+						if (reg[ir.rb] < 0) {
+							pc = ir.p;
+						} else {
+							pc++;
+						}
+						break;
+					case JMPIEK: // Jump to logical address P if Rb == 0
+						if (reg[ir.rb] == 0) {
+							pc = ir.p;
+						} else {
+							pc++;
+						}
+						break;
+					case JMPIGT: // Jump to logical address P if Ra > Rb
+						if (reg[ir.ra] > reg[ir.rb]) {
+							pc = ir.p;
+						} else {
+							pc++;
+						}
+						break;
 
-						case STOP: // por enquanto, para execucao
-							sysCall.stop();
-							cpuStop = true;
-							break;
+					// System Calls & Stop
+					case SYSCALL:
+						sysCall.handle(); // Handle system call
+						// Assuming syscall might modify state but doesn't necessarily stop CPU
+						pc++; // Increment PC after syscall completes
+						// Note: If syscall needs to block/yield, much more logic is needed
+						break;
 
-						// Inexistente
-						default:
-							irpt = Interrupts.intInstrucaoInvalida;
-							break;
-					}
+					case STOP:
+						irpt = Interrupts.intSTOP; // Use interrupt mechanism to signal stop
+						cpuStop = true; // Set flag to stop CPU loop
+						// Don't increment PC after stop
+						break;
+
+					// Data / Invalid Opcodes
+					case DATA:
+					case ___:
+					default:
+						irpt = Interrupts.intInstrucaoInvalida;
+						System.err.println(">>> ERRO: Opcode invalido encontrado: " + ir.opc + " em PC logico " + (pc));
+						break;
 				}
-				// --------------------------------------------------------------------------------------------------
-				// VERIFICA INTERRUPÇÃO !!! - TERCEIRA FASE DO CICLO DE INSTRUÇÕES
-				if (irpt != Interrupts.noInterrupt) { // existe interrupção
-					ih.handle(irpt); // desvia para rotina de tratamento - esta rotina é do SO
-					cpuStop = true; // nesta versao, para a CPU
+
+				// 3. Check for Interrupts (generated during execution)
+				if (irpt != Interrupts.noInterrupt) {
+					ih.handle(irpt); // Call interrupt handler
+					cpuStop = true; // Stop CPU execution cycle on interrupt
 				}
-			} // FIM DO CICLO DE UMA INSTRUÇÃO
-		}
+			} // End of while(!cpuStop) loop
+				// System.out.println("CPU: Ciclo de execução terminado."); // Debug message
+		} // End of run()
 	}
-	// ------------------ C P U - fim
-	// -----------------------------------------------------------------------
-	// ------------------------------------------------------------------------------------------------------
 
-	// ------------------- HW - constituido de CPU e MEMORIA
-	// -----------------------------------------------
+	// ... (HW class remains the same) ...
 	public class HW {
 		public Memory mem;
 		public CPU cpu;
@@ -422,416 +445,805 @@ public class Sistema {
 		public HW(int tamMem, int _pageSize) {
 			mem = new Memory(tamMem);
 			pageSize = _pageSize;
-			cpu = new CPU(mem, true, pageSize);
+			cpu = new CPU(mem, false, pageSize); // Start with trace OFF by default
 		}
-
 	}
-	// -------------------------------------------------------------------------------------------------------
 
-	// --------------------H A R D W A R E - fim
-	// -------------------------------------------------------------
-	// -------------------------------------------------------------------------------------------------------
-
-	// ///////////////////////////////////////////////////////////////////////////////////////////////////////
-
-	// -------------------------------------------------------------------------------------------------------
-	// -------------------------------------------------------------------------------------------------------
-	// ------------------- SW - inicio - Sistema Operacional
-	// -------------------------------------------------
-
-	// ------------------- I N T E R R U P C O E S - rotinas de tratamento
-	// ----------------------------------
+	// ... (InterruptHandling class remains the same) ...
 	public class InterruptHandling {
-		private HW hw; // referencia ao hw se tiver que setar algo
+		// private HW hw; // Not strictly needed if only printing PC from CPU state at
+		// time of interrupt
+		private CPU cpu; // Need CPU reference to get PC at time of interrupt
 
 		public InterruptHandling(HW _hw) {
-			hw = _hw;
+			// hw = _hw;
+			cpu = _hw.cpu;
 		}
 
 		public void handle(Interrupts irpt) {
-			// apenas avisa - todas interrupcoes neste momento finalizam o programa
-			System.out.println(
-					"                                               Interrupcao " + irpt + "   pc: " + hw.cpu.pc);
+			System.out.println("-----------------------------------------------------");
+			System.out.println(">>> INTERRUPCAO: " + irpt + " ocorrida em PC logico: " + cpu.getPC());
+			System.out.println("-----------------------------------------------------");
+			// In a real system, this would trigger context switch or process termination
+			// logic
 		}
 	}
 
-	// ------------------- C H A M A D A S D E S I S T E M A - rotinas de tratamento
-	// ----------------------
+	// ... (SysCallHandling - Minimal changes needed for now) ...
 	public class SysCallHandling {
-		private HW hw; // referencia ao hw se tiver que setar algo
+		private HW hw;
+		private CPU cpu; // Need CPU to access registers
+		private Utilities utils; // May need utils for output formatting or memory access if needed
+		private Memory mem; // Need Memory reference
 
-		public SysCallHandling(HW _hw) {
+		public SysCallHandling(HW _hw, Utilities _utils) { // Pass utils if needed
 			hw = _hw;
+			cpu = hw.cpu;
+			utils = _utils;
+			mem = hw.mem;
 		}
 
-		public void stop() { // chamada de sistema indicando final de programa
-								// nesta versao cpu simplesmente pára
-			System.out.println("                                               SYSCALL STOP");
+		// Called by CPU when STOP is encountered
+		public void stop() { // This method name is a bit confusing as it handles the STOP *instruction*
+			// The actual 'stop' action is handled via interrupt mechanism now
+			// System.out.println(" SYSCALL STOP (handled via interrupt)");
 		}
 
-		public void handle() { // chamada de sistema
-								// suporta somente IO, com parametros
-								// reg[8] = in ou out e reg[9] endereco do inteiro
-			System.out.println("SYSCALL pars:  " + hw.cpu.reg[8] + " / " + hw.cpu.reg[9]);
+		// Called by CPU on SYSCALL instruction
+		public void handle() {
+			int operation = cpu.getRegs()[8]; // Syscall code in R8
+			int arg = cpu.getRegs()[9]; // Argument in R9 (often an address)
 
-			if (hw.cpu.reg[8] == 1) {
-				// leitura ...
+			System.out.print(">>> SYSCALL: Operation=" + operation);
 
-			} else if (hw.cpu.reg[8] == 2) {
-				// escrita - escreve o conteuodo da memoria na posicao dada em reg[9]
-				System.out.println("OUT:   " + hw.mem.pos[hw.cpu.reg[9]].p);
-			} else {
-				System.out.println("  PARAMETRO INVALIDO");
+			switch (operation) {
+				case 1: // Input (example, not fully implemented)
+					System.out.println(" (Input Request)");
+					// Needs interaction with external input, translate address in R9, store result
+					// Example: Read integer and store at logical address in R9
+					try {
+						Scanner sc = new Scanner(System.in);
+						System.out.print("INPUT (para R9=" + arg + "): ");
+						int inputValue = sc.nextInt();
+						int physicalAddress = cpu.translateAddress(arg);
+						if (cpu.irpt == Interrupts.noInterrupt && cpu.legal(physicalAddress)) {
+							mem.pos[physicalAddress].opc = Opcode.DATA;
+							mem.pos[physicalAddress].p = inputValue;
+							System.out.println("    Input " + inputValue + " armazenado em M[" + physicalAddress
+									+ "] (logico " + arg + ")");
+						} else {
+							System.err.println("    Falha ao armazenar input: endereco invalido.");
+							// Interrupt should have been set by translate or legal
+						}
+					} catch (InputMismatchException e) {
+						System.err.println("    Erro de Input: valor nao inteiro digitado.");
+						// Decide how to handle - set interrupt? crash process?
+						cpu.irpt = Interrupts.intInstrucaoInvalida; // Treat as error for now
+					}
+					break;
+				case 2: // Output
+					System.out.print(" (Output Request from logical addr R9=" + arg + ")");
+					int physicalAddressOut = cpu.translateAddress(arg);
+					if (cpu.irpt == Interrupts.noInterrupt && cpu.legal(physicalAddressOut)) {
+						System.out.println("\nOUTPUT: " + mem.pos[physicalAddressOut].p);
+					} else {
+						System.err.println("\n    Falha no Output: endereco invalido.");
+						// Interrupt should have been set by translate or legal
+					}
+					break;
+				default:
+					System.out.println(" (Codigo de Operacao Invalido: " + operation + ")");
+					// Set interrupt for invalid syscall?
+					cpu.irpt = Interrupts.intInstrucaoInvalida;
+					break;
 			}
 		}
 	}
 
-	// ------------------ U T I L I T A R I O S D O S I S T E M A
-	// -----------------------------------------
-	// ------------------ load é invocado a partir de requisição do usuário
-
-	// carga na memória
 	public class Utilities {
 		private HW hw;
+		private SO so; // Need reference to SO to access managers if needed
 
-		public Utilities(HW _hw) {
+		// Constructor updated to receive SO
+		public Utilities(HW _hw, SO _so) {
 			hw = _hw;
+			so = _so; // Store SO reference
 		}
 
-		private void loadProgram(Word[] p) {
-			Word[] m = hw.mem.pos; // m[] é o array de posições memória do hw
-			for (int i = 0; i < p.length; i++) {
-				m[i].opc = p[i].opc;
-				m[i].ra = p[i].ra;
-				m[i].rb = p[i].rb;
-				m[i].p = p[i].p;
-			}
+		// Dump a single word - unchanged
+		public void dump(Word w) {
+			System.out.printf("[ %-7s %3d %3d %4d ]", w.opc, w.ra, w.rb, w.p); // Formatted output
 		}
 
-		// dump da memória
-		public void dump(Word w) { // funcoes de DUMP nao existem em hardware - colocadas aqui para facilidade
-			System.out.print("[ ");
-			System.out.print(w.opc);
-			System.out.print(", ");
-			System.out.print(w.ra);
-			System.out.print(", ");
-			System.out.print(w.rb);
-			System.out.print(", ");
-			System.out.print(w.p);
-			System.out.println("  ] ");
-		}
-
+		// Dump a range of PHYSICAL memory - unchanged
 		public void dump(int ini, int fim) {
-			Word[] m = hw.mem.pos; // m[] é o array de posições memória do hw
-			for (int i = ini; i < fim; i++) {
-				System.out.print(i);
-				System.out.print(":  ");
+			System.out.println("--- Dump da Memoria Fisica (Enderecos: " + ini + " a " + (fim - 1) + ") ---");
+			Word[] m = hw.mem.pos;
+			// Adjust fim to not exceed memory bounds
+			int end = Math.min(fim, m.length);
+			int start = Math.max(0, ini); // Ensure start is not negative
+
+			for (int i = start; i < end; i++) {
+				System.out.printf("%04d: ", i); // Padded address
 				dump(m[i]);
+				System.out.println(); // Newline after each word
 			}
+			System.out.println("--------------------------------------------------");
 		}
 
-		private void loadAndExec(Word[] p) {
-			// NAO USAR ESSE METEDO
-			int programSize = p.length;
+		// Helper to dump memory allocated to a specific process using its page table
+		// Moved here from thought process draft
+		public void dumpMemoryForProcess(List<Integer> pageTable) {
+			System.out.println("--- Dump da Memoria Paginada do Processo (Visao Logica -> Fisica) ---");
 			int pageSize = hw.pageSize;
-			int numPagesNeeded = (int) Math.ceil((double) programSize / pageSize);
-			List<Integer> pageTable = new ArrayList<>();
+			Word[] memory = hw.mem.pos;
 
-			System.out.println("UTILS: Tentando alocar " + programSize + " palavras (" + numPagesNeeded + " paginas).");
-			if (so.mm.aloca(programSize, pageTable)) {
-				System.out.println("UTILS: Alocacao bem-sucedida. Tabela de Paginas (frame numbers): " + pageTable);
-
-				System.out.println("UTILS: Carregando programa na memoria (paginada)...");
-				for (int i = 0; i < programSize; i++) {
-					int logicalAddress = i;
-					int pageNumber = logicalAddress / pageSize;
-					int offset = logicalAddress % pageSize;
-					int frameNumber = pageTable.get(pageNumber);
-					int physicalAddress = (frameNumber * pageSize) + offset;
-
-					if (physicalAddress >= 0 && physicalAddress < hw.mem.pos.length) {
-						hw.mem.pos[physicalAddress].opc = p[i].opc;
-						hw.mem.pos[physicalAddress].ra = p[i].ra;
-						hw.mem.pos[physicalAddress].rb = p[i].rb;
-						hw.mem.pos[physicalAddress].p = p[i].p;
-					} else {
-						System.err.println("UTILS: Erro ao carregar na posicao fisica: " + physicalAddress);
-						so.mm.desaloca(pageTable);
-						return;
-					}
-				}
-				System.out.println("---------------------------------- programa carregado na memoria (paginada)");
-				dumpMemoryByPageTable(pageTable); // Dump apenas as paginas do programa
-
-				// hw.cpu.setContext(0, pageTable); // Seta pc para endereço 0 (lógico) e a tabela de páginas
-				System.out.println("---------------------------------- inicia execucao ");
-				hw.cpu.run(); // cpu roda programa ate parar
-				System.out.println("---------------------------------- memoria após execucao ");
-				dumpMemoryByPageTable(pageTable); // Dump novamente
-
-				so.mm.desaloca(pageTable); // Desaloca os frames do programa
-			} else {
-				System.out.println("UTILS: Falha na alocacao de memoria para o programa.");
+			if (pageTable == null || pageTable.isEmpty()) {
+				System.out.println("  Tabela de paginas vazia ou invalida.");
+				System.out.println("--------------------------------------------------");
+				return;
 			}
 
-		}
-
-		private void dumpMemoryByPageTable(List<Integer> pageTable) {
-			System.out.println("------------------- Dump da Memoria (Paginada) -------------------");
-			for (int i = 0; i < pageTable.size(); i++) {
-				Integer frameNumber = pageTable.get(i);
+			for (int pageIndex = 0; pageIndex < pageTable.size(); pageIndex++) {
+				Integer frameNumber = pageTable.get(pageIndex);
 				if (frameNumber != null) {
-					int startAddress = frameNumber * hw.pageSize;
-					int endAddress = startAddress + hw.pageSize;
-					System.out.println("Pagina " + i + " -> Frame " + frameNumber + " (Endereco Fisico " + startAddress
-							+ "-" + (endAddress - 1) + "):");
-					dump(startAddress, endAddress);
+					int frameStart = frameNumber * pageSize;
+					int frameEnd = Math.min(frameStart + pageSize, memory.length);
+					System.out.println("  Pagina Logica " + pageIndex + " (End. Logicos " + (pageIndex * pageSize) + "-"
+							+ ((pageIndex + 1) * pageSize - 1) + ")"
+							+ " -> Frame Fisico " + frameNumber + " (End. Fisicos " + frameStart + "-" + (frameEnd - 1)
+							+ ")");
+
+					// Dump contents of the frame
+					for (int addr = frameStart; addr < frameEnd; addr++) {
+						// Calculate approximate logical address for context (optional)
+						// int logicalAddr = pageIndex * pageSize + (addr - frameStart);
+						System.out.printf("    Fis: %04d: ", addr);
+						dump(memory[addr]);
+						System.out.println();
+					}
 				} else {
-					System.out.println("Pagina " + i + " nao alocada.");
+					System.out.println("  Pagina Logica " + pageIndex + " -> Nao Mapeada (Frame=null)");
 				}
 			}
-			System.out.println("------------------------------------------------------------------");
-		}
-	}
-	public class Contexto {
-		public int[] regs; // registradores do processo
-		public int pc; // contador de programa do processo
-		public int pid; // ID do processo
-
-		public Contexto(int pid) {
-			this.pc = 0;
-			this.pid = pid;
-			this.regs = new int[10]; // Inicializa os registradores do processo
-		}
-		public void set_state(int[] regs, int pc) {
-			this.regs = regs;
-			this.pc = pc;
+			System.out.println("--------------------------------------------------");
 		}
 
-	}
-	public class ProcessControlBlock {
-		public int pid; // ID do processo
-		public List<Integer> pageTable; // Tabela de páginas do processo
-		public boolean isRunning; // Indica se o processo está em execução
-		public ProcessControlBlock next; // Ponteiro para o próximo PCB na lista encadeada
-		public Contexto contexto; // Contexto do processo (registradores, etc.)
-
-		public ProcessControlBlock(int pid, List<Integer> pageTable, int pc) {
-			this.pid = pid;
-			this.pageTable = pageTable;
-			this.isRunning = false;
-			this.next = null; // Inicializa o próximo PCB como nulo
-			this.contexto = new Contexto(pid); // Cria um novo contexto para o processo
-		}
-	}
-	public class ProcessManagement {
-
-		ProcessControlBlock head = null;
-		ProcessControlBlock tail = null;
-		ProcessControlBlock running = null; // PCB do processo em execução
-		// Lista de aptos
-		List<ProcessControlBlock> aptos = new ArrayList<>(); // Lista de processos aptos para execução
-		CPU cpu = null; // CPU associada ao sistema operacional
-		public ProcessManagement(CPU cpu) {
-			this.cpu = cpu;
-		}
-		public void exec(int pid) {
-			for(ProcessControlBlock pcb : aptos) {
-				if (pcb.pid == pid) {
-					running = pcb; // Define o PCB como o processo em execução
-					pcb.isRunning = true; // Marca o processo como em execução
-					cpu.setContext(pcb.contexto.pc, pcb.pageTable, pcb.contexto.regs); // Seta o contexto da CPU para o processo	
-					cpu.run();
-					break;
-				}
-			}
-
-		}
-
-		boolean criaProcesso(Word[] programa){
-			int programSize = programa.length;
-			List<Integer> pageTable = new ArrayList<>();
+		// Load program words into specific physical memory locations based on page
+		// table
+		// Returns true on success, false on failure
+		public boolean loadProgramToMemory(Word[] program, List<Integer> pageTable) {
+			int programSize = program.length;
 			int pageSize = hw.pageSize;
+			Word[] memory = hw.mem.pos;
 
-			if (!so.mm.aloca(programSize, pageTable)){
-				System.out.println("GM: Nao ha frames suficientes para alocar o programa.");
-				return false;
-			}
-			if (head == null) {
-				head = new ProcessControlBlock(0, pageTable, 0); // Cria o primeiro PCB
-				tail = head; // O primeiro PCB é também o último
-			} else {
-				ProcessControlBlock newPCB = new ProcessControlBlock(tail.pid + 1, pageTable, 0);
-				tail.next = newPCB; // Adiciona o novo PCB à lista encadeada
-				tail = newPCB; // Atualiza o tail para o novo PCB
-			}
+			System.out.println("UTILS: Carregando " + programSize + " palavras usando tabela: " + pageTable);
+
 			for (int i = 0; i < programSize; i++) {
 				int logicalAddress = i;
 				int pageNumber = logicalAddress / pageSize;
 				int offset = logicalAddress % pageSize;
+
+				// Check if page table is large enough
+				if (pageNumber >= pageTable.size() || pageTable.get(pageNumber) == null) {
+					System.err.println("UTILS: Erro ao carregar - Tabela de paginas nao tem entrada para pagina logica "
+							+ pageNumber);
+					return false; // Loading failed
+				}
+
 				int frameNumber = pageTable.get(pageNumber);
 				int physicalAddress = (frameNumber * pageSize) + offset;
 
-				if (physicalAddress >= 0 && physicalAddress < hw.mem.pos.length) {
-					hw.mem.pos[physicalAddress].opc = programa[i].opc;
-					hw.mem.pos[physicalAddress].ra = programa[i].ra;
-					hw.mem.pos[physicalAddress].rb = programa[i].rb;
-					hw.mem.pos[physicalAddress].p = programa[i].p;
+				// Check if physical address is valid
+				if (physicalAddress >= 0 && physicalAddress < memory.length) {
+					memory[physicalAddress].opc = program[i].opc;
+					memory[physicalAddress].ra = program[i].ra;
+					memory[physicalAddress].rb = program[i].rb;
+					memory[physicalAddress].p = program[i].p;
+					// Optional debug print during load
+					// if(hw.cpu.debug) System.out.println(" Loaded word "+i+" to physical addr
+					// "+physicalAddress);
 				} else {
-					System.err.println("UTILS: Erro ao carregar na posicao fisica: " + physicalAddress);
-					so.mm.desaloca(pageTable);
+					System.err.println("UTILS: Erro ao carregar - Endereco fisico calculado invalido: "
+							+ physicalAddress + " para endereco logico " + logicalAddress);
+					// This implies an issue with MemoryManager or page table content
+					return false; // Loading failed
+				}
+			}
+			System.out.println("UTILS: Programa carregado com sucesso.");
+			return true; // Loading successful
+		}
+
+		// The old loadAndExec is removed as process creation and execution are now
+		// separate
+		// private void loadAndExec(Word[] p) { ... }
+	}
+
+	// Contexto remains the same
+	public class Contexto {
+		public int[] regs;
+		public int pc;
+		// Removed pid from here, it's part of PCB
+
+		public Contexto() { // Initialize context
+			this.pc = 0;
+			this.regs = new int[10]; // Assuming 10 registers R0-R9
+			Arrays.fill(this.regs, 0); // Initialize registers to 0
+		}
+
+		// This method isn't really needed if we access fields directly or copy from CPU
+		// public void set_state(int[] regs, int pc) {
+		// this.regs = regs; // Be careful with array references
+		// this.pc = pc;
+		// }
+	}
+
+	// ProcessControlBlock remains largely the same
+	public class ProcessControlBlock {
+		public int pid;
+		public List<Integer> pageTable;
+		// public boolean isRunning; // State derived from being 'running' variable or
+		// in 'aptos' list
+		// public ProcessControlBlock next; // Removing linked list aspect
+		public Contexto contexto;
+		public String programName; // Added to store the program name for 'ps'
+
+		public ProcessControlBlock(int pid, List<Integer> pageTable, String programName) {
+			this.pid = pid;
+			this.pageTable = pageTable; // Reference to the page table list
+			this.programName = programName;
+			// this.isRunning = false;
+			// this.next = null;
+			this.contexto = new Contexto(); // Create a new context (PC=0, regs initialized)
+		}
+	}
+
+	// --- Gerenciador de Processos (ProcessManagement) - Updated ---
+	public class ProcessManagement {
+
+		private List<ProcessControlBlock> aptos; // Ready queue
+		private ProcessControlBlock running; // Currently running process PCB
+		private CPU cpu;
+		private MemoryManagment mm; // Need reference to Memory Manager
+		private Utilities utils; // Need reference to Utilities
+		private HW hw; // Need reference to HW for pageSize etc.
+
+		private static AtomicInteger nextPid = new AtomicInteger(0); // Unique PID generator
+
+		public ProcessManagement(CPU _cpu, MemoryManagment _mm, Utilities _utils, HW _hw) {
+			this.aptos = new LinkedList<>(); // Use LinkedList for efficient add/remove (like a queue)
+			this.running = null;
+			this.cpu = _cpu;
+			this.mm = _mm;
+			this.utils = _utils;
+			this.hw = _hw;
+		}
+
+		// 1. Create Process
+		// boolean criaProcesso( programa )
+		public boolean criaProcesso(Word[] programa, String programName) {
+			if (programa == null || programa.length == 0) {
+				System.out.println("GP: Erro - Programa invalido ou vazio.");
+				return false;
+			}
+
+			int programSize = programa.length;
+			System.out
+					.println("GP: Tentando criar processo para '" + programName + "' (" + programSize + " palavras).");
+
+			// Ask Memory Manager for allocation
+			List<Integer> pageTable = new ArrayList<>(); // Create a new list for this process's page table
+			if (!mm.aloca(programSize, pageTable)) {
+				System.out.println("GP: Falha ao criar processo - Memoria insuficiente.");
+				// mm.aloca should print its own error message
+				return false; // Allocation failed
+			}
+			System.out.println("GP: Memoria alocada com sucesso. Tabela de Paginas: " + pageTable);
+
+			// Create PCB
+			int pid = nextPid.getAndIncrement(); // Get unique PID
+			ProcessControlBlock newPCB = new ProcessControlBlock(pid, pageTable, programName);
+			// PC=0 and registers are initialized in Contexto constructor
+
+			// Load program into allocated memory using the page table
+			if (!utils.loadProgramToMemory(programa, pageTable)) {
+				System.err.println(
+						"GP: Falha ao carregar o programa na memoria para PID " + pid + ". Desalocando memoria.");
+				mm.desaloca(pageTable); // Clean up allocated memory
+				// Don't increment PID again if creation fails here? Maybe revert PID counter?
+				// For now, PID is consumed.
+				return false;
+			}
+			System.out.println("GP: Programa carregado na memoria para PID " + pid);
+
+			// Add PCB to the ready queue
+			aptos.add(newPCB);
+			System.out.println("GP: Processo '" + programName + "' criado com sucesso. PID: " + pid
+					+ ". Adicionado a fila de aptos.");
+
+			return true;
+		}
+
+		// 2. Deallocate Process
+		// desalocaProcesso (id)
+		public void desalocaProcesso(int pid) {
+			System.out.println("GP: Tentando desalocar processo PID: " + pid);
+			// Check if it's the running process
+			if (running != null && running.pid == pid) {
+				System.out.println("GP: Desalocando processo em execucao (PID: " + pid + ").");
+				mm.desaloca(running.pageTable); // Deallocate memory
+				running = null; // Set running to null
+				// Note: CPU context is lost. If preemptive multitasking existed, context saving
+				// would be crucial here.
+				System.out.println("GP: Processo " + pid + " (em execucao) desalocado.");
+				return;
+			}
+
+			// Search in the ready queue (aptos)
+			Iterator<ProcessControlBlock> iterator = aptos.iterator();
+			while (iterator.hasNext()) {
+				ProcessControlBlock pcb = iterator.next();
+				if (pcb.pid == pid) {
+					System.out.println("GP: Desalocando processo na fila de aptos (PID: " + pid + ").");
+					iterator.remove(); // Remove from ready queue
+					mm.desaloca(pcb.pageTable); // Deallocate memory
+					System.out.println("GP: Processo " + pid + " (apto) desalocado.");
+					return;
+				}
+			}
+
+			// If not found running or ready
+			System.out.println("GP: Processo PID " + pid + " nao encontrado para desalocacao.");
+		}
+
+		// Execute Process (simple version: run until stop/interrupt)
+		// exec <id>
+		public void exec(int pid) {
+			if (running != null) {
+				System.out.println("GP: Erro - Ja existe um processo em execucao (PID: " + running.pid + "). Use 'rm "
+						+ running.pid + "' primeiro se necessario.");
+				return;
+			}
+
+			// Find the process in the ready queue
+			ProcessControlBlock pcbToRun = null;
+			Iterator<ProcessControlBlock> iterator = aptos.iterator();
+			while (iterator.hasNext()) {
+				ProcessControlBlock pcb = iterator.next();
+				if (pcb.pid == pid) {
+					pcbToRun = pcb;
+					iterator.remove(); // Remove from ready queue
+					break;
+				}
+			}
+
+			if (pcbToRun != null) {
+				System.out.println("-----------------------------------------------------");
+				System.out.println(
+						"GP: Iniciando execucao do processo PID: " + pid + " ('" + pcbToRun.programName + "')");
+				running = pcbToRun; // Set as the running process
+
+				// Set CPU context from PCB
+				cpu.setContext(running.contexto.pc, running.pageTable, running.contexto.regs);
+
+				// Run the CPU
+				cpu.run(); // Executes instructions until cpuStop is true (STOP, interrupt, error)
+
+				// After CPU stops (for whatever reason)
+				System.out.println("GP: Execucao do processo PID: " + pid + " terminada.");
+
+				// Save the final context back to the PCB (important!)
+				running.contexto.pc = cpu.getPC();
+				// Copy registers back - be careful if getRegs returns a reference vs copy
+				System.arraycopy(cpu.getRegs(), 0, running.contexto.regs, 0, running.contexto.regs.length);
+
+				// Decide what to do with the process now.
+				// Simple model: Assume it finished or hit an error. It's no longer running.
+				// It doesn't automatically go back to ready queue. Requires 'rm' or another
+				// 'exec'.
+				// (A real scheduler would handle state transitions like Ready -> Running ->
+				// Blocked -> Ready etc.)
+				System.out.println("GP: Contexto final salvo para PID " + pid + " (PC=" + running.contexto.pc + ")");
+				// Add process back to ready queue? Optional based on desired behavior.
+				// aptos.add(running); // Uncomment if process should return to ready after
+				// running once
+
+				running = null; // Set running process to null
+				System.out.println("-----------------------------------------------------");
+
+			} else {
+				System.out.println("GP: Processo PID " + pid + " nao encontrado na fila de aptos para execucao.");
+			}
+		}
+
+		// List Processes
+		// ps
+		public void listProcesses() {
+			System.out.println("--- Lista de Processos Ativos ---");
+			boolean found = false;
+			if (running != null) {
+				System.out.println("  PID: " + running.pid + "\t Nome: '" + running.programName
+						+ "' \t Estado: Running \t PC: " + running.contexto.pc);
+				found = true;
+			}
+			if (!aptos.isEmpty()) {
+				System.out.println("--- Fila de Aptos ---");
+				for (ProcessControlBlock pcb : aptos) {
+					System.out.println("  PID: " + pcb.pid + "\t Nome: '" + pcb.programName
+							+ "' \t Estado: Ready \t PC: " + pcb.contexto.pc);
+				}
+				found = true;
+			}
+
+			if (!found) {
+				System.out.println("  Nenhum processo ativo no sistema.");
+			}
+			System.out.println("---------------------------------");
+		}
+
+		// Dump Process Info
+		// dump <id>
+		public void dumpProcess(int pid) {
+			ProcessControlBlock pcbToDump = null;
+
+			// Check if it's the running process
+			if (running != null && running.pid == pid) {
+				pcbToDump = running;
+				System.out.println("--- Dump do Processo (Running) PID: " + pid + " ---");
+			} else {
+				// Search in the ready queue
+				for (ProcessControlBlock pcb : aptos) {
+					if (pcb.pid == pid) {
+						pcbToDump = pcb;
+						System.out.println("--- Dump do Processo (Ready) PID: " + pid + " ---");
+						break;
+					}
+				}
+			}
+
+			if (pcbToDump != null) {
+				System.out.println("Nome do Programa: '" + pcbToDump.programName + "'");
+				System.out.println("Estado: " + (pcbToDump == running ? "Running" : "Ready"));
+				System.out.println("Program Counter (PC): " + pcbToDump.contexto.pc);
+				System.out.print("Registradores: ");
+				if (pcbToDump.contexto.regs != null) {
+					for (int i = 0; i < pcbToDump.contexto.regs.length; i++) {
+						System.out.print("R" + i + "=" + pcbToDump.contexto.regs[i]
+								+ (i == pcbToDump.contexto.regs.length - 1 ? "" : " | "));
+					}
+					System.out.println();
+				} else {
+					System.out.println("N/A");
+				}
+				System.out.println("Tabela de Páginas (Frame Numbers): "
+						+ (pcbToDump.pageTable != null ? pcbToDump.pageTable.toString() : "N/A"));
+
+				// Dump the actual memory content for this process
+				if (pcbToDump.pageTable != null) {
+					utils.dumpMemoryForProcess(pcbToDump.pageTable);
+				} else {
+					System.out.println("Nao foi possivel fazer dump da memoria (tabela de paginas invalida).");
+				}
+				System.out.println("-------------------------------------------");
+
+			} else {
+				System.out.println("GP: Processo PID " + pid + " nao encontrado para dump.");
+			}
+		}
+
+		// Helper to find a PCB (used internally or could be public)
+		public ProcessControlBlock findPCB(int pid) {
+			if (running != null && running.pid == pid) {
+				return running;
+			}
+			for (ProcessControlBlock pcb : aptos) {
+				if (pcb.pid == pid) {
+					return pcb;
+				}
+			}
+			return null;
+		}
+
+	} // --- Fim do ProcessManagement ---
+
+	// --- MemoryManagment (Gerenciador de Memoria) - Updated slightly for clarity
+	// ---
+	public class MemoryManagment {
+		private Set<Integer> freeFrames; // Use Set for efficient add/remove/check
+		private int frameSize; // Tamanho do frame (pagina)
+		private int totalFrames; // Numero total de frames na memoria
+		private int memSize; // Tamanho total da memoria fisica
+
+		public MemoryManagment(int tamMem, int tamFrame) {
+			this.memSize = tamMem;
+			this.frameSize = tamFrame;
+			this.totalFrames = tamMem / tamFrame;
+			this.freeFrames = new HashSet<>();
+
+			System.out.println("GM: Inicializando com " + totalFrames + " frames de tamanho " + tamFrame
+					+ " (Total Mem: " + tamMem + ")");
+			// Initialize all frames as free
+			for (int i = 0; i < totalFrames; i++) {
+				freeFrames.add(i); // Store frame numbers (0 to N-1)
+			}
+			System.out.println("GM: Frames livres iniciais: " + freeFrames.size());
+		}
+
+		// Aloca memoria para um processo
+		// Retorna true se sucesso, false se falha. Popula a pageTable fornecida.
+		public boolean aloca(int numPalavras, List<Integer> pageTable) {
+			int numFramesNeeded = (int) Math.ceil((double) numPalavras / frameSize);
+			System.out.println("GM: Pedido de alocacao para " + numPalavras + " palavras (" + numFramesNeeded
+					+ " frames). Frames livres: " + freeFrames.size());
+
+			if (freeFrames.size() < numFramesNeeded) {
+				System.out.println("GM: Erro - Nao ha frames livres suficientes.");
+				return false; // Not enough free frames
+			}
+
+			// Get an iterator for the set of free frames
+			Iterator<Integer> iterator = freeFrames.iterator();
+			List<Integer> allocatedFrames = new ArrayList<>(); // Keep track of frames allocated in this call
+
+			// Allocate the required number of frames
+			for (int i = 0; i < numFramesNeeded; i++) {
+				if (iterator.hasNext()) {
+					int frameNumber = iterator.next();
+					allocatedFrames.add(frameNumber); // Add to our list for this allocation
+					iterator.remove(); // Remove the frame from the free set *immediately*
+				} else {
+					// Should not happen if initial size check passed, but good practice
+					System.err.println("GM: Erro inesperado - Faltaram frames durante a alocacao!");
+					// Rollback: Add already allocated frames back to free set
+					freeFrames.addAll(allocatedFrames);
+					pageTable.clear(); // Clear the possibly partially filled table
 					return false;
 				}
 			}
-			
-			this.aptos.add(tail);
-			
 
-			return true;
+			// Populate the provided pageTable with the allocated frame numbers
+			pageTable.addAll(allocatedFrames);
+
+			System.out.println("GM: Alocacao bem-sucedida. Frames alocados: " + allocatedFrames
+					+ ". Frames livres restantes: " + freeFrames.size());
+			return true; // Allocation successful
 		}
-		void desalocaProcesso(int pid){
-			ProcessControlBlock current = head;
-			ProcessControlBlock previous = null;
 
-			while (current != null) {
-				if (current.pid == pid) {
-					if (previous == null) {
-						head = current.next; // Remove o primeiro PCB
+		// Desaloca memoria associada a uma tabela de paginas
+		public void desaloca(List<Integer> pageTable) {
+			if (pageTable == null || pageTable.isEmpty()) {
+				System.out.println("GM: Aviso - Tentativa de desalocar com tabela de paginas vazia ou nula.");
+				return;
+			}
+			System.out.print("GM: Desalocando frames da tabela: " + pageTable + ". Frames liberados: ");
+			int count = 0;
+			for (Integer frameNumber : pageTable) {
+				if (frameNumber != null) { // Ensure frame number is valid
+					if (freeFrames.add(frameNumber)) { // Add back to the free set
+						System.out.print(frameNumber + " ");
+						count++;
 					} else {
-						previous.next = current.next; // Remove o PCB do meio ou do fim
+						// This might happen if trying to free an already free frame - indicates a
+						// potential logic error elsewhere
+						System.err.print("(Warning: Frame " + frameNumber + " ja estava livre?) ");
 					}
-					this.aptos.remove(current); // caso o processo esteja na lista de aptos
-					so.mm.desaloca(current.pageTable); // Desaloca a memória do processo
-					System.out.println("GM: Processo " + pid + " desalocado.");
-
-					return;
 				}
-				previous = current;
-				current = current.next;
 			}
-			System.out.println("GM: Processo " + pid + " nao encontrado.");
-		} 
-	}
-
-	public class MemoryManagment {
-		private HashSet<Integer> free_set; // Start pos in memory
-		private int tamFrame;
-
-		public MemoryManagment(int tamMem, int tamPg) {
-			int numFrames = tamMem / tamPg;
-			this.free_set = new HashSet<>();
-			this.tamFrame = tamPg;
-			for (int i = 0; i < numFrames; i++) {
-				free_set.add(i * tamPg);
-			}
+			System.out.println("\nGM: Total de " + count + " frames retornados ao conjunto livre. Frames livres agora: "
+					+ freeFrames.size());
+			pageTable.clear(); // Clear the original table after freeing
 		}
 
-		public boolean aloca(int numPalavras, List<Integer> tabela_paginas) {
-			int numPagesNeeded = (int) Math.ceil((double) numPalavras / tamFrame);
-			if (free_set.size() < numPagesNeeded) {
-				System.out.println("GM: Nao ha frames suficientes para alocar " + numPalavras + " palavras.");
-				return false;
-			}
-			Iterator<Integer> iterator = free_set.iterator();
-			int pagesAllocated = 0;
-			while (iterator.hasNext() && pagesAllocated < numPagesNeeded) {
-				int frameStart = iterator.next();
-				tabela_paginas.add(frameStart / tamFrame); // Store frame number
-				iterator.remove(); // Use iterator.remove() para remover o elemento
-				pagesAllocated++;
-			}
-
-			if (pagesAllocated < numPagesNeeded) {
-				// Se não conseguiu alocar todas as páginas necessárias, desfaz a alocação
-				desaloca(tabela_paginas);
-				System.out.println("GM: Erro ao alocar todos os frames necessarios.");
-				return false;
-			}
-
-			System.out.println("GM: Alocou " + numPagesNeeded + " frames. Tabela de Paginas: " + tabela_paginas);
-			return true;
+		// Optional: Get free frame count
+		public int getFreeFrameCount() {
+			return freeFrames.size();
 		}
 
-		public void desaloca(List<Integer> tabela_paginas) {
-			System.out.print("GM: Desalocando frames: ");
-			for (Integer frameNumber : tabela_paginas) {
-				free_set.add(frameNumber * tamFrame);
-				System.out.print(frameNumber + " ");
-			}
-			System.out.println();
-			tabela_paginas.clear();
-		}
+	} // --- Fim do MemoryManagment ---
 
-	}
-
+	// --- SO (Sistema Operacional) - Links the components ---
 	public class SO {
 		public InterruptHandling ih;
 		public SysCallHandling sc;
 		public Utilities utils;
 		public MemoryManagment mm;
 		public ProcessManagement gp;
+		public HW hw; // Keep a reference to HW if needed by SO directly
 
-		public SO(HW hw) {
-			ih = new InterruptHandling(hw); // rotinas de tratamento de int
-			sc = new SysCallHandling(hw); // chamadas de sistema
-			hw.cpu.setAddressOfHandlers(ih, sc);
-			utils = new Utilities(hw);
+		public SO(HW _hw) {
+			this.hw = _hw; // Store HW reference
+			// Create managers IN ORDER of dependency (Utilities might need SO later)
 			mm = new MemoryManagment(hw.mem.getSize(), hw.pageSize);
-			gp = new ProcessManagement(hw.cpu);
+			// Utilities needs HW, SO (pass 'this' carefully or set later)
+			utils = new Utilities(hw, this); // Pass SO reference to Utilities
+			// Handlers need HW (and potentially utils)
+			ih = new InterruptHandling(hw);
+			sc = new SysCallHandling(hw, utils); // Pass utils to SysCall handler
+			// Process Manager needs CPU, MM, Utils, HW
+			gp = new ProcessManagement(hw.cpu, mm, utils, hw);
+
+			// Set references in CPU
+			hw.cpu.setAddressOfHandlers(ih, sc);
+			hw.cpu.setUtilities(utils); // Pass Utilities reference to CPU
+			System.out.println("SO: Sistema Operacional inicializado.");
 		}
 	}
-	// -------------------------------------------------------------------------------------------------------
-	// ------------------- S I S T E M A
-	// --------------------------------------------------------------------
 
+	// --- Sistema class members ---
 	public HW hw;
 	public SO so;
-	public Programs progs;
+	public Programs progs; // To load programs by name
 
+	// --- Sistema Constructor ---
 	public Sistema(int tamMem, int page_size) {
-		hw = new HW(tamMem, page_size); // memoria do HW tem tamMem palavras
-		so = new SO(hw);
-		hw.cpu.setUtilities(so.utils); // permite cpu fazer dump de memoria ao avancar
-		progs = new Programs();
+		hw = new HW(tamMem, page_size);
+		so = new SO(hw); // SO now initializes all its components
+		// hw.cpu.setUtilities(so.utils); // This is now done inside SO constructor
+		progs = new Programs(); // Load program definitions
+		System.out.println("Sistema: Hardware e SO criados. Pronto para comandos.");
 	}
 
+	// --- Interactive Command Shell ---
 	public void run() {
+		Scanner scanner = new Scanner(System.in);
+		System.out.println("\n--- Simulador de SO v2.0 ---");
+		System.out.println("Digite 'help' para ver os comandos.");
 
-		so.gp.criaProcesso(progs.retrieveProgram("fatorialV2"));
-		so.gp.exec(0); // Executa o processo com PID 0
-		so.gp.desalocaProcesso(0); // Desaloca o processo com PID 0
+		while (true) {
+			System.out.print("\n> ");
+			String line = scanner.nextLine().trim();
+			if (line.isEmpty()) {
+				continue;
+			}
 
+			String[] parts = line.split("\\s+", 2); // Split into command and the rest
+			String command = parts[0].toLowerCase();
+			String args = parts.length > 1 ? parts[1] : "";
 
+			try { // Add try-catch for parsing errors
+				switch (command) {
+					case "new":
+						if (args.isEmpty()) {
+							System.out.println("Uso: new <nomeDoPrograma>");
+							System.out.println("Programas disponiveis: " + progs.getAvailableProgramNames());
+						} else {
+							Word[] programImage = progs.retrieveProgram(args);
+							if (programImage != null) {
+								boolean success = so.gp.criaProcesso(programImage, args);
+								// criaProcesso now prints success/failure messages including PID
+							} else {
+								System.out.println("Erro: Programa '" + args + "' nao encontrado.");
+								System.out.println("Programas disponiveis: " + progs.getAvailableProgramNames());
+							}
+						}
+						break;
 
-		// so.utils.loadAndExec(progs.retrieveProgram("fatorialV2"));
+					case "rm":
+						if (args.isEmpty()) {
+							System.out.println("Uso: rm <pid>");
+						} else {
+							try {
+								int pid = Integer.parseInt(args);
+								so.gp.desalocaProcesso(pid);
+							} catch (NumberFormatException e) {
+								System.out.println("Erro: PID invalido '" + args + "'. Deve ser um numero.");
+							}
+						}
+						break;
 
-		// so.utils.loadAndExec(progs.retrieveProgram("fatorial"));
-		// fibonacci10,
-		// fibonacci10v2,
-		// progMinimo,
-		// fatorialWRITE, // saida
-		// fibonacciREAD, // entrada
-		// PB
-		// PC, // bubble sort
-	}
-	// ------------------- S I S T E M A - fim
-	// --------------------------------------------------------------
-	// -------------------------------------------------------------------------------------------------------
+					case "ps":
+						so.gp.listProcesses();
+						break;
 
-	// -------------------------------------------------------------------------------------------------------
-	// ------------------- instancia e testa sistema
+					case "dump":
+						if (args.isEmpty()) {
+							System.out.println("Uso: dump <pid>");
+						} else {
+							try {
+								int pid = Integer.parseInt(args);
+								so.gp.dumpProcess(pid);
+							} catch (NumberFormatException e) {
+								System.out.println("Erro: PID invalido '" + args + "'. Deve ser um numero.");
+							}
+						}
+						break;
+
+					case "dumpm": // dumpM
+						String[] memArgs = args.split("\\s*,\\s*|\\s+"); // Split by comma or space
+						if (memArgs.length != 2) {
+							System.out.println("Uso: dumpm <inicio>, <fim>  ou  dumpm <inicio> <fim>");
+						} else {
+							try {
+								int start = Integer.parseInt(memArgs[0]);
+								int end = Integer.parseInt(memArgs[1]);
+								if (start < 0 || end <= start || end > hw.mem.getSize()) {
+									System.out.println("Erro: Intervalo invalido [" + start + ", " + end
+											+ "). Max memoria: " + hw.mem.getSize());
+								} else {
+									so.utils.dump(start, end); // Dump physical memory range
+								}
+							} catch (NumberFormatException e) {
+								System.out.println("Erro: Inicio/Fim invalidos. Devem ser numeros.");
+							}
+						}
+						break;
+
+					case "exec":
+						if (args.isEmpty()) {
+							System.out.println("Uso: exec <pid>");
+						} else {
+							try {
+								int pid = Integer.parseInt(args);
+								so.gp.exec(pid);
+							} catch (NumberFormatException e) {
+								System.out.println("Erro: PID invalido '" + args + "'. Deve ser um numero.");
+							}
+						}
+						break;
+
+					case "traceon":
+						hw.cpu.setDebug(true);
+						break;
+
+					case "traceoff":
+						hw.cpu.setDebug(false);
+						break;
+
+					case "meminfo": // Added command to see memory status
+						System.out.println("--- Info Memoria ---");
+						System.out.println("Tamanho Total: " + so.mm.memSize + " palavras");
+						System.out.println("Tamanho Frame/Pagina: " + so.mm.frameSize + " palavras");
+						System.out.println("Total de Frames: " + so.mm.totalFrames);
+						System.out.println("Frames Livres: " + so.mm.getFreeFrameCount());
+						System.out.println("--------------------");
+						break;
+
+					case "help":
+						System.out.println("Comandos disponiveis:");
+						System.out.println(
+								"  new <nomePrograma>   - Cria um novo processo a partir de um programa conhecido");
+						System.out.println(
+								"                         (Programas: " + progs.getAvailableProgramNames() + ")");
+						System.out.println("  rm <pid>             - Remove o processo com o ID especificado");
+						System.out.println("  ps                   - Lista todos os processos (running/ready)");
+						System.out.println("  dump <pid>           - Mostra detalhes do PCB e memoria do processo");
+						System.out.println("  dumpm <inicio>,<fim> - Mostra conteudo da memoria fisica no intervalo");
+						System.out.println("  exec <pid>           - Executa o processo (apto) com o ID especificado");
+						System.out
+								.println("  traceon              - Ativa modo de debug da CPU (mostra cada instrucao)");
+						System.out.println("  traceoff             - Desativa modo de debug da CPU");
+						System.out.println("  meminfo              - Mostra status da memoria (frames livres/totais)");
+						System.out.println("  exit                 - Encerra o simulador");
+						System.out.println("  help                 - Mostra esta ajuda");
+						break;
+
+					case "exit":
+						System.out.println("Encerrando o simulador...");
+						scanner.close(); // Close scanner
+						return; // Exit the run method
+
+					default:
+						System.out.println("Comando desconhecido: '" + command + "'. Digite 'help' para ajuda.");
+						break;
+				}
+			} catch (Exception e) { // Catch unexpected errors during command processing
+				System.err.println("!!! Erro inesperado processando comando: " + e.getMessage());
+				e.printStackTrace(); // Print stack trace for debugging
+			}
+		} // End while loop
+	} // End run()
+
+	// --- Main Method ---
 	public static void main(String args[]) {
-		Sistema s = new Sistema(1024, 16);
-		s.run();
+		// Define memory size and page size
+		int memorySize = 1024; // Example: 1KB total memory
+		int pageSize = 16; // Example: 16 words per page/frame
+
+		Sistema s = new Sistema(memorySize, pageSize);
+		s.run(); // Start the interactive shell
 	}
 
-	// -------------------------------------------------------------------------------------------------------
-	// -------------------------------------------------------------------------------------------------------
-	// -------------------------------------------------------------------------------------------------------
-	// --------------- P R O G R A M A S - não fazem parte do sistema
-	// esta classe representa programas armazenados (como se estivessem em disco)
-	// que podem ser carregados para a memória (load faz isto)
-
+	// --- Program Definitions ---
 	public class Program {
 		public String name;
 		public Word[] image;
@@ -844,14 +1256,7 @@ public class Sistema {
 
 	public class Programs {
 
-		public Word[] retrieveProgram(String pname) {
-			for (Program p : progs) {
-				if (p != null & p.name == pname)
-					return p.image;
-			}
-			return null;
-		}
-
+		// Array holding the predefined programs
 		public Program[] progs = {
 				new Program("fatorial",
 						new Word[] {
@@ -1133,5 +1538,28 @@ public class Sistema {
 								new Word(Opcode.DATA, -1, -1, -1)
 						})
 		};
-	}
-}
+
+		// Retrieve program image by name
+		public Word[] retrieveProgram(String pname) {
+			if (pname == null)
+				return null;
+			for (Program p : progs) {
+				if (p != null && pname.equals(p.name)) { // Use .equals for string comparison
+					return p.image;
+				}
+			}
+			return null; // Not found
+		}
+
+		// Get list of available program names
+		public String getAvailableProgramNames() {
+			List<String> names = new ArrayList<>();
+			for (Program p : progs) {
+				if (p != null)
+					names.add(p.name);
+			}
+			return String.join(", ", names);
+		}
+	} // --- Fim do Programs ---
+
+} // --- Fim da classe Sistema ---
