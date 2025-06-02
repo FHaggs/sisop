@@ -580,6 +580,7 @@ public class SistemaEscalonador {
 					+ operation);
 
 			switch (operation) {
+				//TODO: Pedro Fam gay bloqueia processo e manda requisicao para a fila de dispositivos
 				case 1: // Input
 					System.out.println(" (Input Request para end logico R9=" + arg + ")");
 					try {
@@ -607,6 +608,7 @@ public class SistemaEscalonador {
 					// intervention
 					break;
 
+				//TODO: Pedro Fam gay bloqueia processo e manda requisicao para a fila de dispositivos
 				case 2: // Output
 					System.out.print(" (Output Request do end logico R9=" + arg + ")");
 					int physicalAddressOut = cpu.translateAddress(arg);
@@ -766,6 +768,7 @@ public class SistemaEscalonador {
 	public class ProcessManagement {
 
 		private LinkedList<ProcessControlBlock> aptos; // Ready queue (FIFO)
+		private LinkedList<ProcessControlBlock> bloqueados; // Blocked queue (FIFO)
 		private ProcessControlBlock running; // Currently running process PCB
 		private CPU cpu;
 		private MemoryManagment mm;
@@ -932,6 +935,32 @@ public class SistemaEscalonador {
 				System.out.println("GP: Fila de aptos VAZIA. Nenhum processo para escalonar.");
 				cpu.stopCPU(); // Signal CPU to stop if no one is running
 				schedulerActive = false; // Stop the execAll loop if it's running
+			}
+		}
+
+		public void bloqueiaProcesso (ProcessControlBlock pcb){
+			if (pcb != null) {
+				System.out.println("GP: Bloqueando processo PID: " + pcb.pid + " ('" + pcb.programName + "')");
+				// 1. Save context
+				saveContext(pcb);
+				// 2. Remove from running or ready queue
+				if (running == pcb) {
+					running = null; // Clear running if it was the current process
+				} else {
+					aptos.remove(pcb); // Remove from ready queue if present
+				}
+				// 3. Add to blocked queue
+				bloqueados.addLast(pcb);
+			}
+		}
+
+		public void desbloqueiaProcesso (ProcessControlBlock pcb){
+			if (pcb != null) {
+				System.out.println("GP: Desbloqueando processo PID: " + pcb.pid + " ('" + pcb.programName + "')");
+				// 1. Remove from blocked queue
+				bloqueados.remove(pcb);
+				// 2. Add to ready queue
+				addToReadyQueue(pcb);
 			}
 		}
 
