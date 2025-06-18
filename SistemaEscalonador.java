@@ -1,5 +1,10 @@
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.io.FileNotFoundException;
 
 public class SistemaEscalonador {
 
@@ -44,14 +49,15 @@ public class SistemaEscalonador {
 		JMPIGK, JMPILK, JMPIEK, JMPIGT,
 		ADDI, SUBI, ADD, SUB, MULT,
 		LDI, LDD, STD, LDX, STX, MOVE,
-		SYSCALL, STOP
+		SYSCALL, STOP, NOP
 	}
 
 	// --- UPDATED Interrupts Enum ---
 	public enum Interrupts {
 		noInterrupt, intEnderecoInvalido, intInstrucaoInvalida, intOverflow,
 		intSTOP, // STOP instruction treated as an interrupt source
-		intTempo; // NEW: Timer interrupt for preemption
+		intTempo, // Timer interrupt for preemption
+		intIO; // NEW: I/O operation completion interrupt
 	}
 
 	// --- UPDATED CPU Class ---
@@ -76,6 +82,7 @@ public class SistemaEscalonador {
 
 		private boolean cpuStop; // General stop flag (used by handlers to stop CPU)
 		private boolean debug; // Trace flag
+		private boolean runningNOP; // NEW: Flag to indicate if running NOP program
 
 		public CPU(Memory _mem, boolean _debug, int _pageSize, int _quantum) {
 			maxInt = 32767;
@@ -88,7 +95,8 @@ public class SistemaEscalonador {
 			pc = 0;
 			irpt = Interrupts.noInterrupt;
 			cycleCounter = 0; // Initialize cycle counter
-			cpuStop = true; // Start in stopped state
+			cpuStop = false; // Changed to false to keep CPU running
+			runningNOP = false;
 		}
 
 		public void setAddressOfHandlers(InterruptHandling _ih, SysCallHandling _sysCall) {
@@ -129,6 +137,7 @@ public class SistemaEscalonador {
 			irpt = Interrupts.noInterrupt;
 			cycleCounter = 0; // Reset cycle counter for new context/slice
 			cpuStop = false; // Ensure CPU is ready to run
+			runningNOP = false;
 			if (debug) {
 				System.out.println("CPU: Contexto carregado - PC_log=" + pc + " Paginas=" + page_table);
 			}
@@ -179,16 +188,16 @@ public class SistemaEscalonador {
 		// --- Public method to signal CPU should stop (e.g., by scheduler or error)
 		// ---
 		public void stopCPU() {
-			this.cpuStop = true;
+			if (!runningNOP) {
+				startNOPProgram();
+			}
 		}
 
 		// --- The main CPU execution cycle ---
 		// Now runs instructions until an interrupt occurs or cpuStop is set externally
 		public void run() {
 			if (page_table == null) {
-				System.err.println("CPU: Nao pode executar sem uma tabela de paginas carregada.");
-				stopCPU(); // Ensure CPU stops if context wasn't set
-				return;
+				startNOPProgram();
 			}
 
 			cpuStop = false; // Set running state
@@ -436,7 +445,8 @@ public class SistemaEscalonador {
 
 					// --- Invalid/Data Opcodes ---
 					case DATA:
-					case ___:
+					case NOP:
+						break;
 					default:
 						irpt = Interrupts.intInstrucaoInvalida;
 						System.err.println(">>> ERRO CPU: Opcode invalido (" + currentOpc + ") encontrado em PC logico "
@@ -474,22 +484,37 @@ public class SistemaEscalonador {
 
 			// cpuStop = true; // Ensure CPU is marked as stopped after run cycle finishes
 		} // End of run()
+
+		// NEW: Method to start NOP program
+		private void startNOPProgram() {
+			if (!runningNOP) {
+				runningNOP = true;
+				page_table = new ArrayList<>();
+				page_table.add(0); // Use first frame for NOP program
+				pc = 0;
+				// Create NOP program in memory if not already there
+				if (m[0].opc != Opcode.NOP) {
+					m[0] = new Word(Opcode.NOP, -1, -1, -1); // NOP instruction
+				}
+				if (debug) {
+					System.out.println("CPU: Iniciando programa NOP");
+				}
+			}
+		}
 	}
 
 	// --- UPDATED InterruptHandling Class ---
 	public class InterruptHandling {
 		private CPU cpu;
-		private SO so; // Need SO reference to access ProcessManager (gp)
+		private SO so;
 
-		// Constructor now takes SO
 		public InterruptHandling(SO _so) {
 			this.so = _so;
-			this.cpu = _so.hw.cpu; // Get CPU reference from SO->HW
+			this.cpu = _so.hw.cpu;
 		}
 
-		// Handle method now takes the PC at the time of interrupt
 		public void handle(Interrupts irpt, int interruptedPC) {
-			ProcessControlBlock currentProcess = so.gp.getRunningProcess(); // Get the currently running PCB
+			ProcessControlBlock currentProcess = so.gp.getRunningProcess();
 
 			System.out.println("-----------------------------------------------------");
 			System.out.println(
@@ -501,15 +526,12 @@ public class SistemaEscalonador {
 					// Time slice end - Preemption
 					if (currentProcess != null) {
 						System.out.println("GP: Quantum expirado para PID " + currentProcess.pid);
-						// 1. Save context of the current process
 						so.gp.saveContext(currentProcess);
-						// 2. Put it back in the ready queue
 						so.gp.addToReadyQueue(currentProcess);
-						// 3. Schedule the next process
 						so.gp.schedule();
 					} else {
 						System.err.println("IH: Erro - intTempo mas nenhum processo estava rodando?");
-						cpu.stopCPU(); // Stop CPU if state is inconsistent
+						cpu.stopCPU();
 					}
 					break;
 
@@ -517,9 +539,7 @@ public class SistemaEscalonador {
 					// Process requested termination
 					if (currentProcess != null) {
 						System.out.println("GP: Processo PID " + currentProcess.pid + " executou STOP.");
-						// 1. Deallocate the process (memory, PCB)
-						so.gp.terminateProcess(currentProcess); // New method for termination logic
-						// 2. Schedule the next process
+						so.gp.terminateProcess(currentProcess);
 						so.gp.schedule();
 					} else {
 						System.err.println("IH: Erro - intSTOP mas nenhum processo estava rodando?");
@@ -527,28 +547,58 @@ public class SistemaEscalonador {
 					}
 					break;
 
+				case intIO:
+					// I/O operation completed
+					if (so.ioCompletedRequest != null) {
+						System.out.println("IH: Operacao de I/O completada para PID " + so.ioCompletedRequest.pid);
+
+						// Find the blocked process
+						ProcessControlBlock blockedProcess = null;
+						for (ProcessControlBlock pcb : so.gp.bloqueados) {
+							if (pcb.pid == so.ioCompletedRequest.pid) {
+								blockedProcess = pcb;
+								break;
+							}
+						}
+
+						if (blockedProcess != null) {
+							// Unblock the process
+							so.gp.desbloqueiaProcesso(blockedProcess);
+							System.out.println("IH: Processo PID " + blockedProcess.pid + " desbloqueado.");
+							
+							// If no process is running, schedule the unblocked process
+							if (so.gp.getRunningProcess() == null) {
+								so.gp.schedule();
+							}
+						} else {
+							System.err.println("IH: Erro - Processo PID " + so.ioCompletedRequest.pid + " nao encontrado na fila de bloqueados.");
+						}
+
+						// Clear the completed request
+						so.ioCompletedRequest = null;
+					}
+					break;
+
 				case intEnderecoInvalido:
 				case intInstrucaoInvalida:
 				case intOverflow:
-					// Process error - Terminate the process
-					System.err.println("IH: Erro irrecuperavel no processo PID "
-							+ (currentProcess != null ? currentProcess.pid : "N/A") + ". Terminando.");
+					// Error interrupts - terminate the process
 					if (currentProcess != null) {
+						System.out.println(
+								"GP: Processo PID " + currentProcess.pid + " terminado por erro (" + irpt + ").");
 						so.gp.terminateProcess(currentProcess);
-						so.gp.schedule(); // Schedule next
+						so.gp.schedule();
 					} else {
-						System.err.println("IH: Erro critico sem processo rodando?");
+						System.err.println("IH: Erro - " + irpt + " mas nenhum processo estava rodando?");
 						cpu.stopCPU();
 					}
 					break;
 
-				case noInterrupt:
 				default:
-					System.err.println("IH: Handler chamado com interrupcao inesperada: " + irpt);
-					cpu.stopCPU(); // Stop on unexpected state
+					System.err.println("IH: Interrupcao desconhecida: " + irpt);
+					cpu.stopCPU();
 					break;
 			}
-			System.out.println("-----------------------------------------------------");
 		}
 	}
 
@@ -559,17 +609,14 @@ public class SistemaEscalonador {
 		private CPU cpu;
 		private Utilities utils;
 		private Memory mem;
-		private SO so; // Need SO for potential blocking operations later
+		private SO so;
 
 		public SysCallHandling(SO _so) {
 			this.so = _so;
-			this.hw = _so.hw; // Get HW from SO
-			this.cpu = hw.cpu;
-			this.utils = _so.utils; // Get Utils from SO
-			this.mem = hw.mem;
+			this.cpu = _so.hw.cpu;
+			this.utils = _so.utils;
+			this.mem = _so.hw.mem;
 		}
-
-		// Removed stop() method as STOP is handled via interrupt
 
 		public void handle() {
 			int operation = cpu.reg[8]; // Syscall code in R8
@@ -580,57 +627,52 @@ public class SistemaEscalonador {
 					+ operation);
 
 			switch (operation) {
-				//TODO: Pedro Fam gay bloqueia processo e manda requisicao para a fila de dispositivos
 				case 1: // Input
-					System.out.println(" (Input Request para end logico R9=" + arg + ")");
-					try {
-						Scanner sc = new Scanner(System.in);
-						System.out.print("INPUT: ");
-						int inputValue = sc.nextInt();
-						// sc.nextLine(); // Consume newline if mixing nextInt and nextLine
-
-						int physicalAddress = cpu.translateAddress(arg);
-						// Check if translation failed OR address is invalid
-						if (cpu.irpt != Interrupts.noInterrupt || !cpu.legal(physicalAddress)) {
-							System.err.println("\n    SYSCALL Input: Falha - endereco invalido.");
-							// Interrupt is already set by translateAddress or legal
-						} else {
-							mem.pos[physicalAddress].opc = Opcode.DATA;
-							mem.pos[physicalAddress].p = inputValue;
-							System.out.println("    Input " + inputValue + " armazenado em M[" + physicalAddress
-									+ "] (logico " + arg + ")");
-						}
-					} catch (InputMismatchException e) {
-						System.err.println("\n    SYSCALL Input: Erro - valor nao inteiro digitado.");
-						cpu.irpt = Interrupts.intInstrucaoInvalida; // Treat as error for now
-					}
-					// In a real system, this might block the process, requiring scheduler
-					// intervention
+					System.out.println(" (Input Request)");
+					// Create I/O request and add to device queue
+					IORequest request = new IORequest(
+							so.gp.getRunningProcess().pid,
+							1, // Input operation
+							arg, // Memory address to store input
+							0 // No value for input
+					);
+					so.device.addRequest(request);
+					// Block the process
+					so.gp.bloqueiaProcesso(so.gp.getRunningProcess());
+					// Schedule next process
+					so.gp.schedule();
 					break;
 
-				//TODO: Pedro Fam gay bloqueia processo e manda requisicao para a fila de dispositivos
 				case 2: // Output
-					System.out.print(" (Output Request do end logico R9=" + arg + ")");
-					int physicalAddressOut = cpu.translateAddress(arg);
-					if (cpu.irpt != Interrupts.noInterrupt || !cpu.legal(physicalAddressOut)) {
-						System.err.println("\n    SYSCALL Output: Falha - endereco invalido.");
-						// Interrupt already set
+					System.out.println(" (Output Request)");
+					// Get value from memory
+					int physicalAddress = cpu.translateAddress(arg);
+					if (cpu.irpt == Interrupts.noInterrupt && cpu.legal(physicalAddress)) {
+						int value = mem.pos[physicalAddress].p;
+						// Create I/O request and add to device queue
+						IORequest outRequest = new IORequest(
+								so.gp.getRunningProcess().pid,
+								2, // Output operation
+								arg, // Memory address
+								value // Value to output
+						);
+						so.device.addRequest(outRequest);
+						// Block the process
+						so.gp.bloqueiaProcesso(so.gp.getRunningProcess());
+						// Schedule next process
+						so.gp.schedule();
 					} else {
-						// Ensure reading data, not code? Optional check.
-						// if (mem.pos[physicalAddressOut].opc != Opcode.DATA) { ... }
-						System.out.println("\nOUTPUT: " + mem.pos[physicalAddressOut].p);
+						System.err.println("    Falha no Output: endereco invalido.");
+						cpu.irpt = Interrupts.intEnderecoInvalido;
 					}
 					break;
 
 				default:
-					System.out.println(" (Codigo de Operacao Invalido: " + operation + ")");
-					cpu.irpt = Interrupts.intInstrucaoInvalida; // Set invalid instruction interrupt
+					System.err.println("    Operacao de sistema desconhecida: " + operation);
+					cpu.irpt = Interrupts.intInstrucaoInvalida;
 					break;
 			}
 		}
-
-		// --- HW reference needed by constructor ---
-		private HW hw; // Add HW reference
 	}
 
 	// ... (Utilities class remains largely the same) ...
@@ -782,6 +824,7 @@ public class SistemaEscalonador {
 		// needed
 		public ProcessManagement(CPU _cpu, MemoryManagment _mm, Utilities _utils) {
 			this.aptos = new LinkedList<>();
+			this.bloqueados = new LinkedList<>(); // Initialize blocked queue
 			this.running = null;
 			this.cpu = _cpu;
 			this.mm = _mm;
@@ -934,11 +977,11 @@ public class SistemaEscalonador {
 				running = null;
 				System.out.println("GP: Fila de aptos VAZIA. Nenhum processo para escalonar.");
 				cpu.stopCPU(); // Signal CPU to stop if no one is running
-				schedulerActive = false; // Stop the execAll loop if it's running
+				// schedulerActive = false; // Stop the execAll loop if it's running
 			}
 		}
 
-		public void bloqueiaProcesso (ProcessControlBlock pcb){
+		public void bloqueiaProcesso(ProcessControlBlock pcb) {
 			if (pcb != null) {
 				System.out.println("GP: Bloqueando processo PID: " + pcb.pid + " ('" + pcb.programName + "')");
 				// 1. Save context
@@ -951,16 +994,24 @@ public class SistemaEscalonador {
 				}
 				// 3. Add to blocked queue
 				bloqueados.addLast(pcb);
+				// Schedule next process if this was the running process
+				if (running == null) {
+					schedule();
+				}
 			}
 		}
 
-		public void desbloqueiaProcesso (ProcessControlBlock pcb){
+		public void desbloqueiaProcesso(ProcessControlBlock pcb) {
 			if (pcb != null) {
 				System.out.println("GP: Desbloqueando processo PID: " + pcb.pid + " ('" + pcb.programName + "')");
 				// 1. Remove from blocked queue
 				bloqueados.remove(pcb);
 				// 2. Add to ready queue
 				addToReadyQueue(pcb);
+				// If no process is running, schedule this one
+				if (running == null) {
+					schedule();
+				}
 			}
 		}
 
@@ -1057,26 +1108,28 @@ public class SistemaEscalonador {
 
 		// --- List Processes ---
 		public void listProcesses() {
-			System.out.println("--- Lista de Processos Ativos ---");
-			boolean found = false;
-			if (running != null) {
-				System.out.println("  PID: " + running.pid + "\t Nome: '" + running.programName
-						+ "' \t Estado: Running \t PC: " + running.contexto.pc);
-				found = true;
-			}
-			if (!aptos.isEmpty()) {
-				// System.out.println("--- Fila de Aptos ---"); // Redundant if listing all
+			System.out.println("\n--- Lista de Processos ---");
+			System.out.println("Processo em execucao: "
+					+ (running != null ? "PID " + running.pid + " ('" + running.programName + "')" : "Nenhum"));
+
+			System.out.println("\nFila de Prontos:");
+			if (aptos.isEmpty()) {
+				System.out.println("  (Vazia)");
+			} else {
 				for (ProcessControlBlock pcb : aptos) {
-					System.out.println("  PID: " + pcb.pid + "\t Nome: '" + pcb.programName
-							+ "' \t Estado: Ready \t PC: " + pcb.contexto.pc);
+					System.out.println("  PID " + pcb.pid + " ('" + pcb.programName + "')");
 				}
-				found = true;
 			}
 
-			if (!found) {
-				System.out.println("  Nenhum processo ativo no sistema.");
+			System.out.println("\nFila de Bloqueados:");
+			if (bloqueados.isEmpty()) {
+				System.out.println("  (Vazia)");
+			} else {
+				for (ProcessControlBlock pcb : bloqueados) {
+					System.out.println("  PID " + pcb.pid + " ('" + pcb.programName + "')");
+				}
 			}
-			System.out.println("---------------------------------");
+			System.out.println("------------------------\n");
 		}
 
 		// --- Dump Process Info ---
@@ -1230,21 +1283,27 @@ public class SistemaEscalonador {
 		public MemoryManagment mm;
 		public ProcessManagement gp;
 		public HW hw;
+		public Device device;
+		public IORequest ioCompletedRequest;
+		private Scanner shellInput; // NEW: Scanner for shell input
 
 		public SO(HW _hw) {
-			this.hw = _hw;
-			// Create managers and handlers
-			mm = new MemoryManagment(hw.mem.getSize(), hw.pageSize);
-			utils = new Utilities(hw, this); // Pass SO reference
-			// Pass SO reference to handlers/managers that need it
+			hw = _hw;
 			ih = new InterruptHandling(this);
 			sc = new SysCallHandling(this);
-			gp = new ProcessManagement(hw.cpu, mm, utils); // Pass CPU, MM, Utils
-
-			// Set references in CPU
+			utils = new Utilities(hw, this);
+			
+			mm = new MemoryManagment(hw.mem.getSize(), hw.pageSize);
+			gp = new ProcessManagement(hw.cpu, mm, utils);
+			device = new Device(hw.cpu, this);
+			shellInput = new Scanner(System.in); // NEW: Initialize shell input
 			hw.cpu.setAddressOfHandlers(ih, sc);
 			hw.cpu.setUtilities(utils);
-			System.out.println("SO: Sistema Operacional inicializado com Quantum = " + DELTA_T);
+		}
+
+		// NEW: Method to get shell input
+		public String getShellInput() {
+			return shellInput.nextLine();
 		}
 	}
 
@@ -1279,48 +1338,42 @@ public class SistemaEscalonador {
 
 	// --- UPDATED Interactive Command Shell ---
 	public void runV2() {
-		Scanner scanner = new Scanner(System.in);
-		System.out.println("\n--- Simulador de SO v2.1 (com Escalonamento) ---");
-		System.out.println("Quantum (Delta T): " + DELTA_T + " instrucoes.");
-		System.out.println("Digite 'help' para ver os comandos.");
+		System.out.println("Sistema Operacional iniciado. Digite 'help' para ver os comandos disponiveis.");
+		System.out.println("Programas disponiveis: " + progs.getAvailableProgramNames());
 
 		while (true) {
-			System.out.print("\n> ");
-			String line = scanner.nextLine().trim();
-			if (line.isEmpty())
-				continue;
-
-			String[] parts = line.split("\\s+", 2);
-			String command = parts[0].toLowerCase();
-			String args = parts.length > 1 ? parts[1] : "";
-
 			try {
-				switch (command) {
+				System.out.print("\nSO> ");
+				String command = so.getShellInput();
+				if (command == null) continue;
+
+				String[] parts = command.trim().split("\\s+");
+				if (parts.length == 0) continue;
+
+				switch (parts[0]) {
 					case "new":
-						if (args.isEmpty()) {
-							System.out.println("Uso: new <nomeDoPrograma>");
-							System.out.println("Programas disponiveis: " + progs.getAvailableProgramNames());
+						if (parts.length != 2) {
+							System.out.println("Uso: new <nomePrograma>");
+							break;
+						}
+						Word[] programa = progs.retrieveProgram(parts[1]);
+						if (programa != null) {
+							so.gp.criaProcesso(programa, parts[1]);
 						} else {
-							Word[] programImage = progs.retrieveProgram(args);
-							if (programImage != null) {
-								so.gp.criaProcesso(programImage, args);
-							} else {
-								System.out.println("Erro: Programa '" + args + "' nao encontrado.");
-								System.out.println("Programas disponiveis: " + progs.getAvailableProgramNames());
-							}
+							System.out.println("Programa '" + parts[1] + "' nao encontrado.");
 						}
 						break;
 
 					case "rm":
-						if (args.isEmpty()) {
+						if (parts.length != 2) {
 							System.out.println("Uso: rm <pid>");
-						} else {
-							try {
-								int pid = Integer.parseInt(args);
-								so.gp.desalocaProcesso(pid);
-							} catch (NumberFormatException e) {
-								System.out.println("Erro: PID invalido '" + args + "'. Deve ser um numero.");
-							}
+							break;
+						}
+						try {
+							int pid = Integer.parseInt(parts[1]);
+							so.gp.desalocaProcesso(pid);
+						} catch (NumberFormatException e) {
+							System.out.println("PID deve ser um numero inteiro.");
 						}
 						break;
 
@@ -1329,56 +1382,51 @@ public class SistemaEscalonador {
 						break;
 
 					case "dump":
-						if (args.isEmpty()) {
+						if (parts.length != 2) {
 							System.out.println("Uso: dump <pid>");
-						} else {
-							try {
-								int pid = Integer.parseInt(args);
-								so.gp.dumpProcess(pid);
-							} catch (NumberFormatException e) {
-								System.out.println("Erro: PID invalido '" + args + "'. Deve ser um numero.");
-							}
+							break;
+						}
+						try {
+							int pid = Integer.parseInt(parts[1]);
+							so.gp.dumpProcess(pid);
+						} catch (NumberFormatException e) {
+							System.out.println("PID deve ser um numero inteiro.");
 						}
 						break;
 
 					case "dumpm":
-						String[] memArgs = args.split("\\s*,\\s*|\\s+");
-						if (memArgs.length != 2) {
-							System.out.println("Uso: dumpm <inicio>, <fim>  ou  dumpm <inicio> <fim>");
-						} else {
-							try {
-								int start = Integer.parseInt(memArgs[0]);
-								int end = Integer.parseInt(memArgs[1]);
-								if (start < 0 || end <= start || end > hw.mem.getSize()) {
-									System.out.println("Erro: Intervalo invalido [" + start + ", " + end
-											+ "). Max memoria: " + hw.mem.getSize());
-								} else {
-									so.utils.dump(start, end);
-								}
-							} catch (NumberFormatException e) {
-								System.out.println("Erro: Inicio/Fim invalidos. Devem ser numeros.");
-							}
+						if (parts.length != 2) {
+							System.out.println("Uso: dumpm <inicio>,<fim>");
+							break;
+						}
+						String[] range = parts[1].split(",");
+						if (range.length != 2) {
+							System.out.println("Formato invalido. Use: dumpm <inicio>,<fim>");
+							break;
+						}
+						try {
+							int inicio = Integer.parseInt(range[0]);
+							int fim = Integer.parseInt(range[1]);
+							so.utils.dump(inicio, fim);
+						} catch (NumberFormatException e) {
+							System.out.println("Inicio e fim devem ser numeros inteiros.");
 						}
 						break;
 
-					// 'exec <pid>' behaviour changed - see ProcessManagement.exec
 					case "exec":
-						if (args.isEmpty()) {
+						if (parts.length != 2) {
 							System.out.println("Uso: exec <pid>");
-							System.out.println(
-									"Nota: Em modo escalonado, 'exec' apenas tenta priorizar o processo na proxima vez que o escalonador rodar (se nao estiver rodando). Use 'execAll' para iniciar a execucao.");
-						} else {
-							try {
-								int pid = Integer.parseInt(args);
-								so.gp.exec(pid); // Tries to prioritize the process
-							} catch (NumberFormatException e) {
-								System.out.println("Erro: PID invalido '" + args + "'. Deve ser um numero.");
-							}
+							break;
+						}
+						try {
+							int pid = Integer.parseInt(parts[1]);
+							so.gp.exec(pid);
+						} catch (NumberFormatException e) {
+							System.out.println("PID deve ser um numero inteiro.");
 						}
 						break;
 
-					// --- NEW execAll Command ---
-					case "execall":
+					case "execAll":
 						so.gp.execAll();
 						break;
 
@@ -1391,37 +1439,29 @@ public class SistemaEscalonador {
 						break;
 
 					case "meminfo":
-						System.out.println("--- Info Memoria ---");
-						System.out.println("Tamanho Total: " + so.mm.getMemSize() + " palavras");
-						System.out.println("Tamanho Frame/Pagina: " + so.mm.getFrameSize() + " palavras");
-						System.out.println("Total de Frames: " + so.mm.getTotalFrames());
-						System.out.println("Frames Livres: " + so.mm.getFreeFrameCount());
-						System.out.println("--------------------");
+						System.out.println("Memoria: " + so.mm.getFreeFrameCount() + "/" + so.mm.getTotalFrames()
+								+ " frames livres (tamanho frame: " + so.mm.getFrameSize() + " palavras)");
 						break;
 
 					case "help":
 						System.out.println("Comandos disponiveis:");
-						System.out.println(
-								"  new <nomePrograma>   - Cria um novo processo (estado Ready)");
-						System.out.println(
-								"                         (Programas: " + progs.getAvailableProgramNames() + ")");
-						System.out.println("  rm <pid>             - Remove (termina e desaloca) o processo");
-						System.out.println("  ps                   - Lista processos (Running/Ready)");
-						System.out.println("  dump <pid>           - Mostra detalhes (PCB, memoria) do processo");
-						System.out.println("  dumpm <inicio>,<fim> - Mostra memoria fisica no intervalo");
-						System.out.println(
-								"  exec <pid>           - Tenta priorizar processo para proxima execucao (veja 'execall')");
-						System.out.println(
-								"  execall              - Inicia a execucao escalonada de todos processos Ready");
-						System.out.println("  traceon / traceoff   - Ativa/Desativa modo de debug da CPU");
-						System.out.println("  meminfo              - Mostra status da memoria");
+						System.out.println("  new <nomePrograma>   - Cria um novo processo a partir de um programa conhecido");
+						System.out.println("                         (Programas: " + progs.getAvailableProgramNames() + ")");
+						System.out.println("  rm <pid>             - Remove o processo com o ID especificado");
+						System.out.println("  ps                   - Lista todos os processos (running/ready)");
+						System.out.println("  dump <pid>           - Mostra detalhes do PCB e memoria do processo");
+						System.out.println("  dumpm <inicio>,<fim> - Mostra conteudo da memoria fisica no intervalo");
+						System.out.println("  exec <pid>           - Executa o processo (apto) com o ID especificado");
+						System.out.println("  execAll              - Executa todos os processos prontos");
+						System.out.println("  traceon              - Ativa modo de debug da CPU (mostra cada instrucao)");
+						System.out.println("  traceoff             - Desativa modo de debug da CPU");
+						System.out.println("  meminfo              - Mostra status da memoria (frames livres/totais)");
 						System.out.println("  exit                 - Encerra o simulador");
 						System.out.println("  help                 - Mostra esta ajuda");
 						break;
 
 					case "exit":
 						System.out.println("Encerrando o simulador...");
-						scanner.close();
 						return;
 
 					default:
@@ -1429,10 +1469,10 @@ public class SistemaEscalonador {
 						break;
 				}
 			} catch (Exception e) {
-				System.err.println("!!! Erro inesperado processando comando '" + command + "': " + e.getMessage());
-				e.printStackTrace(); // For debugging
+				System.err.println("!!! Erro inesperado processando comando: " + e.getMessage());
+				e.printStackTrace();
 			}
-		} // End while loop
+		}
 	} // End run()
 
 	// --- Main Method ---
@@ -1499,6 +1539,21 @@ public class SistemaEscalonador {
 								new Word(Opcode.DATA, -1, -1, -1), // POS 18
 								new Word(Opcode.DATA, -1, -1, -1) } // POS 19
 				),
+				new Program("inputTest",
+						new Word[] {
+								new Word(Opcode.LDI, 8, -1, 1), // R8 = 1 (código para input)
+								new Word(Opcode.LDI, 9, -1, 10), // R9 = 10 (endereço para input)
+								new Word(Opcode.SYSCALL, -1, -1, -1), // SYSCALL IN
+								new Word(Opcode.LDI, 8, -1, 2), // R8 = 2 (código para output)
+								new Word(Opcode.LDI, 9, -1, 10), // R9 = 10 (endereço para output)
+								new Word(Opcode.SYSCALL, -1, -1, -1), // SYSCALL OUT
+								new Word(Opcode.STOP, -1, -1, -1), // STOP
+								new Word(Opcode.DATA, -1, -1, -1), // 10: espaço para input/output
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+						}),
 
 				new Program("progMinimo",
 						new Word[] {
@@ -1661,5 +1716,139 @@ public class SistemaEscalonador {
 			return String.join(", ", names);
 		}
 	} // --- Fim do Programs ---
+
+	// NEW: Device class to handle I/O operations
+	public class Device {
+		private Queue<IORequest> requestQueue;
+		private boolean isProcessing;
+		private CPU cpu;
+		private SO so;
+		private Thread deviceThread;
+		private RandomAccessFile inputFile; // NEW: File for program input
+		private long lastPosition; // NEW: Track last read position
+
+		public Device(CPU _cpu, SO _so) {
+			this.cpu = _cpu;
+			this.so = _so;
+			this.requestQueue = new LinkedList<>();
+			this.isProcessing = false;
+			this.lastPosition = 0;
+			try {
+				this.inputFile = new RandomAccessFile("input.txt", "r");
+			} catch (FileNotFoundException e) {
+				System.err.println("Erro: Arquivo input.txt nao encontrado!");
+				System.exit(1);
+			}
+			startDeviceThread();
+		}
+
+		private void startDeviceThread() {
+			deviceThread = new Thread(() -> {
+				while (true) {
+					synchronized (requestQueue) {
+						while (requestQueue.isEmpty()) {
+							try {
+								requestQueue.wait();
+							} catch (InterruptedException e) {
+								Thread.currentThread().interrupt();
+								return;
+							}
+						}
+						isProcessing = true;
+						IORequest request = requestQueue.poll();
+						processRequest(request);
+						isProcessing = false;
+					}
+				}
+			});
+			deviceThread.setDaemon(true);
+			deviceThread.start();
+		}
+
+		private void processRequest(IORequest request) {
+			try {
+				switch (request.operation) {
+					case 1: // Input
+						System.out.print("INPUT (para PID " + request.pid + "): ");
+						// Read from file
+						inputFile.seek(lastPosition);
+						String inputLine = inputFile.readLine();
+						if (inputLine == null) {
+							System.err.println("    Erro: Fim do arquivo de input atingido.");
+							cpu.irpt = Interrupts.intInstrucaoInvalida;
+							break;
+						}
+						lastPosition = inputFile.getFilePointer();
+						int inputValue = Integer.parseInt(inputLine);
+						System.out.println(inputValue); // Echo the input
+
+						// Translate address and store input
+						int physicalAddress = cpu.translateAddress(request.address);
+						if (cpu.irpt == Interrupts.noInterrupt && cpu.legal(physicalAddress)) {
+							so.hw.mem.pos[physicalAddress].opc = Opcode.DATA;
+							so.hw.mem.pos[physicalAddress].p = inputValue;
+							System.out.println("    Input " + inputValue + " armazenado em M[" + physicalAddress
+									+ "] (logico " + request.address + ")");
+						} else {
+							System.err.println("    Falha ao armazenar input: endereco invalido.");
+							cpu.irpt = Interrupts.intEnderecoInvalido;
+						}
+						break;
+
+					case 2: // Output
+						System.out.println("OUTPUT (PID " + request.pid + "): " + request.value);
+						break;
+
+					default:
+						System.err.println("    Operacao de I/O desconhecida: " + request.operation);
+						break;
+				}
+
+				// Simulate I/O delay
+				Thread.sleep(1000);
+
+				// Signal I/O completion through interrupt
+				cpu.irpt = Interrupts.intIO;
+				// Store the completed request for the interrupt handler
+				so.ioCompletedRequest = request;
+
+			} catch (NumberFormatException e) {
+				System.err.println("    Erro de Input: valor nao inteiro digitado.");
+				cpu.irpt = Interrupts.intInstrucaoInvalida;
+			} catch (IOException e) {
+				System.err.println("    Erro de I/O: " + e.getMessage());
+				cpu.irpt = Interrupts.intInstrucaoInvalida;
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				return;
+			}
+		}
+
+		public void addRequest(IORequest request) {
+			synchronized (requestQueue) {
+				requestQueue.add(request);
+				requestQueue.notify();
+			}
+		}
+
+		public boolean isProcessing() {
+			return isProcessing;
+		}
+	}
+
+	// NEW: Class to represent I/O requests
+	public class IORequest {
+		public int pid;
+		public int operation; // 1 for input, 2 for output
+		public int address; // Memory address for the operation
+		public int value; // For output operations
+
+		public IORequest(int pid, int operation, int address, int value) {
+			this.pid = pid;
+			this.operation = operation;
+			this.address = address;
+			this.value = value;
+		}
+	}
 
 } // --- Fim da classe Sistema ---
