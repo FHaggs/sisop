@@ -5,12 +5,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+
+import javax.swing.text.Utilities;
+
 import java.util.concurrent.ConcurrentHashMap;
 
 public class SistemaEscalonador {
 
 	// --- Configuration ---
-	private static final int DELTA_T = 5; // Example: 5 instructions per time slice
+	private static final int DELTA_T = 5;
+	private static final int DISK_SWAP_TIME_MS = 100; // Tempo para operações de disco
+	private static final int IO_DEVICE_TIME_MS = 250; // Tempo para IO do usuário
 
 	// ... (Memory, Word, Opcode remain the same) ...
 	public class Memory {
@@ -52,10 +57,71 @@ public class SistemaEscalonador {
 		SYSCALL, STOP
 	}
 
+	public class PageTableEntry {
+		public int frameNumber = -1; // -1 se não estiver na memória
+		public boolean validBit = false;
+		public boolean dirtyBit = false;
+		public int swapLocation = -1; // -1 se nunca foi para o swap
+	}
+
+	public class FrameTableEntry {
+		public int pid = -1;
+		public int pageNumber = -1;
+		public boolean pinned = false; // Travado para I/O
+	}
+
 	public enum Interrupts {
 		noInterrupt, intEnderecoInvalido, intInstrucaoInvalida, intOverflow,
 		intSTOP, // STOP instruction treated as an interrupt source
-		intTempo; // NEW: Timer interrupt for preemption
+		intTempo, // NEW: Timer interrupt for preemption,
+		intPageFault;
+	}
+
+	public enum PedidoDiscoTipo {
+		LOAD_FROM_EXECUTABLE, // Carregar página pela 1ª vez
+		LOAD_FROM_SWAP, // Carregar página que estava no swap
+		SAVE_TO_SWAP // Salvar página vítima no swap
+	}
+
+	public class PedidoDisco {
+		public PedidoDiscoTipo tipo;
+		public int pid;
+		public int pageNumber;
+		public int frameNumber;
+		public int swapLocation;
+		public String programName; // Apenas para LOAD_FROM_EXECUTABLE
+
+		// Construtor para carregar
+		public PedidoDisco(PedidoDiscoTipo tipo, int pid, int pageNumber, int frameNumber, String programName,
+				int swapLocation) {
+			this.tipo = tipo;
+			this.pid = pid;
+			this.pageNumber = pageNumber;
+			this.frameNumber = frameNumber;
+			this.programName = programName;
+			this.swapLocation = swapLocation;
+		}
+	}
+
+	public enum InterrupcaoDiscoTipo {
+		PAGE_LOAD_COMPLETE, // Carga de página (de qualquer fonte) concluída
+		PAGE_SAVE_COMPLETE // Escrita de página no swap concluída
+	}
+
+	public class InterrupcaoDisco {
+		public InterrupcaoDiscoTipo tipo;
+		public int pid;
+		public int pageNumber;
+		public int frameNumber;
+		public int oldPid; // Para PAGE_SAVE_COMPLETE, PID do processo vitimado
+
+		public InterrupcaoDisco(InterrupcaoDiscoTipo tipo, int pid, int pageNumber, int frameNumber, int oldPid) {
+			this.tipo = tipo;
+			this.pid = pid;
+			this.pageNumber = pageNumber;
+			this.frameNumber = frameNumber;
+			this.oldPid = oldPid;
+		}
 	}
 
 	public class CPU {
@@ -79,6 +145,10 @@ public class SistemaEscalonador {
 
 		private volatile boolean cpuStop; // MODIFICADO: volatile para visibilidade entre threads
 		private boolean debug; // Trace flag
+
+		// MODIFICADO: A CPU agora interage com a Tabela de Páginas do processo em
+		// execução
+		private ProcessControlBlock runningProcess;
 
 		public CPU(Memory _mem, boolean _debug, int _pageSize, int _quantum) {
 			maxInt = 32767;
@@ -171,25 +241,33 @@ public class SistemaEscalonador {
 			}
 		}
 
-		private int translateAddress(int logicalAddress) {
-			if (page_table == null) {
-				System.err.println(">>> ERRO CPU: Tentativa de traducao sem tabela de paginas carregada!");
+		private int translateAddress(int logicalAddress, boolean isWrite) {
+			if (runningProcess == null) {
 				irpt = Interrupts.intEnderecoInvalido;
 				return -1;
 			}
 			int pageNumber = logicalAddress / pageSize;
 			int offset = logicalAddress % pageSize;
 
-			if (pageNumber < 0 || pageNumber >= page_table.size() || page_table.get(pageNumber) == null) {
-				System.err.println(">>> ERRO CPU: Endereco logico " + logicalAddress + " (pagina " + pageNumber
-						+ ") fora dos limites da tabela ou pagina nao mapeada.");
+			if (pageNumber < 0 || pageNumber >= runningProcess.pageTable.length) {
 				irpt = Interrupts.intEnderecoInvalido;
 				return -1;
 			}
 
-			int frameNumber = page_table.get(pageNumber);
-			int physicalAddress = (frameNumber * pageSize) + offset;
-			return physicalAddress;
+			PageTableEntry pte = runningProcess.pageTable[pageNumber];
+
+			if (!pte.validBit) {
+				System.out.println(
+						">>> CPU: Endereço " + logicalAddress + " (página " + pageNumber + ") não está na memória.");
+				irpt = Interrupts.intPageFault;
+				return -1;
+			}
+
+			if (isWrite) {
+				pte.dirtyBit = true;
+			}
+
+			return (pte.frameNumber * pageSize) + offset;
 		}
 
 		public int getPC() {
@@ -227,7 +305,7 @@ public class SistemaEscalonador {
 			while (!cpuStop && irpt == Interrupts.noInterrupt) {
 
 				// 1. Fetch Instruction
-				int physicalPC = translateAddress(pc);
+				int physicalPC = translateAddress(pc, false);
 				if (irpt != Interrupts.noInterrupt)
 					break;
 				if (!legal(physicalPC))
@@ -256,7 +334,7 @@ public class SistemaEscalonador {
 						break;
 					case LDD: {
 						int logicalAddress = ir.p;
-						int physicalAddress = translateAddress(logicalAddress);
+						int physicalAddress = translateAddress(logicalAddress, false);
 						if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
 							if (m[physicalAddress].opc == Opcode.DATA) {
 								reg[ir.ra] = m[physicalAddress].p;
@@ -269,7 +347,7 @@ public class SistemaEscalonador {
 					}
 					case LDX: {
 						int logicalAddress = reg[ir.rb];
-						int physicalAddress = translateAddress(logicalAddress);
+						int physicalAddress = translateAddress(logicalAddress, false);
 						if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
 							if (m[physicalAddress].opc == Opcode.DATA) {
 								reg[ir.ra] = m[physicalAddress].p;
@@ -282,7 +360,7 @@ public class SistemaEscalonador {
 					}
 					case STD: {
 						int logicalAddress = ir.p;
-						int physicalAddress = translateAddress(logicalAddress);
+						int physicalAddress = translateAddress(logicalAddress, true);
 						if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
 							m[physicalAddress].opc = Opcode.DATA;
 							m[physicalAddress].p = reg[ir.ra];
@@ -292,7 +370,7 @@ public class SistemaEscalonador {
 					}
 					case STX: {
 						int logicalAddress = reg[ir.ra];
-						int physicalAddress = translateAddress(logicalAddress);
+						int physicalAddress = translateAddress(logicalAddress, true);
 						if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
 							m[physicalAddress].opc = Opcode.DATA;
 							m[physicalAddress].p = reg[ir.rb];
@@ -357,7 +435,7 @@ public class SistemaEscalonador {
 						break;
 					case JMPIM: {
 						int logicalAddress = ir.p;
-						int physicalAddress = translateAddress(logicalAddress);
+						int physicalAddress = translateAddress(logicalAddress, false);
 						if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
 							pc = m[physicalAddress].p;
 						}
@@ -366,7 +444,7 @@ public class SistemaEscalonador {
 					case JMPIGM: {
 						if (reg[ir.rb] > 0) {
 							int logicalAddress = ir.p;
-							int physicalAddress = translateAddress(logicalAddress);
+							int physicalAddress = translateAddress(logicalAddress, false);
 							if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
 								pc = m[physicalAddress].p;
 							}
@@ -378,7 +456,7 @@ public class SistemaEscalonador {
 					case JMPILM: {
 						if (reg[ir.rb] < 0) {
 							int logicalAddress = ir.p;
-							int physicalAddress = translateAddress(logicalAddress);
+							int physicalAddress = translateAddress(logicalAddress, false);
 							if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
 								pc = m[physicalAddress].p;
 							}
@@ -390,7 +468,7 @@ public class SistemaEscalonador {
 					case JMPIEM: {
 						if (reg[ir.rb] == 0) {
 							int logicalAddress = ir.p;
-							int physicalAddress = translateAddress(logicalAddress);
+							int physicalAddress = translateAddress(logicalAddress, false);
 							if (irpt == Interrupts.noInterrupt && legal(physicalAddress)) {
 								pc = m[physicalAddress].p;
 							}
@@ -465,6 +543,91 @@ public class SistemaEscalonador {
 		}
 	}
 
+	public class DiskManager {
+		private Map<Integer, Word[]> swapSpace = new ConcurrentHashMap<>();
+		private Set<Integer> freeSwapSlots = new HashSet<>();
+		private AtomicInteger nextSwapSlot = new AtomicInteger(0);
+
+		public int allocateSwapSlot() {
+			return freeSwapSlots.isEmpty() ? nextSwapSlot.getAndIncrement() : freeSwapSlots.iterator().next();
+		}
+
+		public void freeSwapSlot(int slot) {
+			swapSpace.remove(slot);
+			freeSwapSlots.add(slot);
+		}
+		
+		public void savePageToSwap(int swapSlot, int frameNumber) {
+			Word[] pageData = new Word[so.hw.pageSize];
+			System.arraycopy(so.hw.mem.pos, frameNumber * so.hw.pageSize, pageData, 0, so.hw.pageSize);
+			swapSpace.put(swapSlot, pageData);
+		}
+
+		public void loadPageFromSwap(int swapSlot, int frameNumber) {
+			Word[] pageData = swapSpace.get(swapSlot);
+			System.arraycopy(pageData, 0, so.hw.mem.pos, frameNumber * so.hw.pageSize, so.hw.pageSize);
+		}
+
+		public void loadPageFromExecutable(String programName, int pageNumber, int frameNumber) {
+			Word[] programImage = so.progs.retrieveProgram(programName);
+			int start = pageNumber * so.hw.pageSize;
+			int end = Math.min(start + so.hw.pageSize, programImage.length);
+			int length = end - start;
+			
+			// Limpa o frame antes de carregar
+			Arrays.fill(so.hw.mem.pos, frameNumber * so.hw.pageSize, (frameNumber + 1) * so.hw.pageSize, new Word(Opcode.___, -1, -1, -1));
+			System.arraycopy(programImage, start, so.hw.mem.pos, frameNumber * so.hw.pageSize, length);
+		}
+	}
+
+	public class DiskDeviceThread extends Thread {
+		@Override
+		public void run() {
+			while (!so.shutdown) {
+				try {
+					PedidoDisco pedido = so.filaDisco.take();
+					if (so.shutdown) break;
+
+					Thread.sleep(DISK_SWAP_TIME_MS);
+
+					int oldPid = -1; // Usado para notificar sobre a conclusão do SAVE
+					if (pedido.tipo == PedidoDiscoTipo.SAVE_TO_SWAP) {
+						so.diskManager.savePageToSwap(pedido.swapLocation, pedido.frameNumber);
+						oldPid = so.mm.getFrameOwner(pedido.frameNumber).pid;
+						so.mm.unpinFrame(pedido.frameNumber); // Libera o frame após salvar
+						System.out.println("DISCO: Página do PID " + oldPid + " salva no swap. Frame " + pedido.frameNumber + " livre.");
+						so.filaInterrupcoesDisco.put(new InterrupcaoDisco(InterrupcaoDiscoTipo.PAGE_SAVE_COMPLETE, pedido.pid, pedido.pageNumber, pedido.frameNumber, oldPid));
+					} else { // É um LOAD
+						if (pedido.tipo == PedidoDiscoTipo.LOAD_FROM_EXECUTABLE) {
+							so.diskManager.loadPageFromExecutable(pedido.programName, pedido.pageNumber, pedido.frameNumber);
+						} else { // LOAD_FROM_SWAP
+							so.diskManager.loadPageFromSwap(pedido.swapLocation, pedido.frameNumber);
+						}
+						so.mm.unpinFrame(pedido.frameNumber);
+						System.out.println("DISCO: Página " + pedido.pageNumber + " do PID " + pedido.pid + " carregada no frame " + pedido.frameNumber);
+						so.filaInterrupcoesDisco.put(new InterrupcaoDisco(InterrupcaoDiscoTipo.PAGE_LOAD_COMPLETE, pedido.pid, pedido.pageNumber, pedido.frameNumber, -1));
+					}
+				} catch (InterruptedException e) { break; }
+			}
+		}
+	}
+
+	public class DiskInterruptHandlerThread extends Thread {
+		@Override
+		public void run() {
+			while(!so.shutdown) {
+				try {
+					InterrupcaoDisco irpt = so.filaInterrupcoesDisco.take();
+					if (irpt.tipo == InterrupcaoDiscoTipo.PAGE_LOAD_COMPLETE) {
+						so.mm.finalizePageLoad(irpt.pid, irpt.pageNumber, irpt.frameNumber);
+					} else { // PAGE_SAVE_COMPLETE
+						so.mm.handlePageSaveCompletion(irpt.pid, irpt.pageNumber, irpt.frameNumber);
+					}
+				} catch (InterruptedException e) { break; }
+			}
+		}
+	}
+
 	public class InterruptHandling {
 		private CPU cpu;
 		private SO so;
@@ -488,6 +651,15 @@ public class SistemaEscalonador {
 					+ " (Processo PID: " + currentProcess.pid + ")");
 
 			switch (irpt) {
+				case intPageFault:
+					// O orquestrador da memória virtual!
+					so.gp.saveContext(currentProcess); // Salva PC e registradores
+					currentProcess.contexto.pc = interruptedPC; // Garante que o PC do fault é salvo
+					so.gp.blockProcess(currentProcess, "PAGE_FAULT");
+					so.mm.handlePageFault(currentProcess, interruptedPC);
+					so.gp.schedule();
+					break;
+
 				case intTempo:
 					// Preempção
 					so.gp.saveContext(currentProcess);
@@ -632,17 +804,24 @@ public class SistemaEscalonador {
 
 	public class ProcessControlBlock {
 		public int pid;
-		public List<Integer> pageTable;
+		public PageTableEntry[] pageTable; // MODIFICADO
 		public Contexto contexto;
 		public String programName;
 		public ProcessState state; // MODIFICADO: Adicionado estado ao PCB
+		public int programSize; // Tamanho do programa em palavras
 
-		public ProcessControlBlock(int pid, List<Integer> pageTable, String programName) {
+		public ProcessControlBlock(int pid, int programSize, String programName) {
 			this.pid = pid;
-			this.pageTable = pageTable;
 			this.programName = programName;
+			this.programSize = programSize;
 			this.contexto = new Contexto();
-			this.state = ProcessState.READY; // MODIFICADO: Estado inicial é READY
+			this.state = ProcessState.BLOCKED; // Inicia bloqueado esperando a 1ª página
+
+			int numPages = (int) Math.ceil((double) programSize / so.hw.pageSize);
+			this.pageTable = new PageTableEntry[numPages];
+			for (int i = 0; i < numPages; i++) {
+				this.pageTable[i] = new PageTableEntry();
+			}
 		}
 	}
 
