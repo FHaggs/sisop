@@ -5,6 +5,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class SistemaEscalonador {
 
@@ -945,6 +946,9 @@ public class SistemaEscalonador {
 		public HW hw;
 		public BlockingQueue<PedidoIO> filaIO;
 		public BlockingQueue<Integer> filaInterrupcoesIO;
+
+		public IOManager ioManager;
+
 		public volatile boolean shutdown = false; // MODIFICADO: Flag para encerrar o sistema
 
 		// MODIFICADO: Gerenciador da thread da CPU
@@ -960,6 +964,8 @@ public class SistemaEscalonador {
 			ih = new InterruptHandling(this);
 			sc = new SysCallHandling(this);
 			gp = new ProcessManagement(hw.cpu, mm, utils);
+
+			this.ioManager = new IOManager();
 
 			hw.cpu.setAddressOfHandlers(ih, sc);
 			hw.cpu.setUtilities(utils);
@@ -1047,6 +1053,27 @@ public class SistemaEscalonador {
 							so.filaIO.add(new PedidoIO(-1, -1, false)); // Sinal para a outra thread de IO parar
 							scanner.close();
 							return;
+						case "input":
+							try {
+								String[] inputArgs = args.split("\\s+");
+								if (inputArgs.length != 2) {
+									System.out.println("Uso: input <pid> <valor>");
+									break;
+								}
+								int pid = Integer.parseInt(inputArgs[0]);
+								int valor = Integer.parseInt(inputArgs[1]);
+
+								if (so.ioManager.provideInput(pid, valor)) {
+									System.out.println(
+											"<SHELL> Valor " + valor + " enviado para o processo PID " + pid + ".");
+								} else {
+									System.out.println("<SHELL> Erro: Processo PID " + pid
+											+ " não está aguardando por um input no momento.");
+								}
+							} catch (NumberFormatException e) {
+								System.out.println("Erro: PID e valor devem ser números inteiros.");
+							}
+							break;
 
 						case "help":
 							System.out.println("Comandos disponiveis:");
@@ -1136,42 +1163,69 @@ public class SistemaEscalonador {
 		public void run() {
 			while (!so.shutdown) {
 				try {
-					PedidoIO pedido = so.filaIO.take(); // Bloqueia até ter pedido
+					PedidoIO pedido = so.filaIO.take();
 
 					if (so.shutdown || pedido.pid == -1)
 						break;
 
 					System.out.println("DISPOSITIVO IO: Iniciando operacao para PID " + pedido.pid);
-					Thread.sleep(150); // Simula tempo de IO
-					ProcessControlBlock pcbDoPedido = so.gp.findProcessInBlockedQueue(pedido.pid);
+					// Reduzir o sleep para a simulação ficar mais ágil
+					Thread.sleep(150);
 
-					if (pcbDoPedido == null) {
-						System.err.println("DISPOSITIVO IO: ERRO! Processo PID " + pedido.pid
-								+ " nao foi encontrado na fila de bloqueados. O processo pode ter sido terminado. Abortando IO.");
-						continue; // Pega o próximo pedido
-					}
-
-					int endFisico = so.hw.cpu.translateAddress(pedido.endLogico, pcbDoPedido.pageTable);
-
-					// Se for leitura, insere valor fictício
 					if (pedido.isRead) {
-						int valorLido = new Random().nextInt(1000); // Simulando leitura de um valor
-						so.hw.mem.pos[endFisico].opc = Opcode.DATA;
-						so.hw.mem.pos[endFisico].p = valorLido;
-						System.out.println("DISPOSITIVO IO: Leitura concluída para PID " + pedido.pid + ". Valor "
-								+ valorLido + " escrito no endereco fisico " + endFisico);
-					} else { // Escrita
+						// É uma LEITURA (INPUT)
+						try {
+							// 1. Bloqueia esta thread até que a Shell forneça um valor via IOManager
+							int valorLido = so.ioManager.awaitInput(pedido.pid);
+
+							// 2. Após receber o valor, encontra o PCB e escreve na memória
+							ProcessControlBlock pcbDoPedido = so.gp.findProcessInBlockedQueue(pedido.pid);
+							if (pcbDoPedido == null) {
+								System.err.println("DISPOSITIVO IO: ERRO! PID " + pedido.pid
+										+ " não está mais bloqueado. Abortando escrita na memória.");
+								continue;
+							}
+
+							int endFisico = so.hw.cpu.translateAddress(pedido.endLogico, pcbDoPedido.pageTable);
+							if (endFisico != -1) {
+								so.hw.mem.pos[endFisico].opc = Opcode.DATA;
+								so.hw.mem.pos[endFisico].p = valorLido;
+								System.out
+										.println("DISPOSITIVO IO: Leitura concluída para PID " + pedido.pid + ". Valor "
+												+ valorLido + " escrito no endereco fisico " + endFisico);
+							} else {
+								System.err.println(
+										"DISPOSITIVO IO: ERRO! Endereço físico inválido para escrita do input.");
+							}
+						} catch (InterruptedException e) {
+							System.out.println("DISPOSITIVO IO: A espera por input para o PID " + pedido.pid
+									+ " foi interrompida.");
+							Thread.currentThread().interrupt(); // Restaura o status de interrupção
+							continue; // Pula para o próximo pedido
+						}
+					} else {
+						// É uma ESCRITA (OUTPUT), a lógica antiga continua válida
+						ProcessControlBlock pcbDoPedido = so.gp.findProcessInBlockedQueue(pedido.pid);
+						if (pcbDoPedido == null) {
+							System.err.println("DISPOSITIVO IO: ERRO! Processo PID " + pedido.pid
+									+ " não foi encontrado. Abortando OUTPUT.");
+							continue;
+						}
+						int endFisico = so.hw.cpu.translateAddress(pedido.endLogico, pcbDoPedido.pageTable);
 						int valorEscrito = so.hw.mem.pos[endFisico].p;
 						System.out.println("DISPOSITIVO IO: Escrita concluída para PID " + pedido.pid
 								+ ". Valor lido do endereco fisico " + endFisico + " = " + valorEscrito);
 					}
 
-					// Sinaliza interrupção de conclusão de IO
+					// Sinaliza interrupção de conclusão de IO para desbloquear o processo
 					so.filaInterrupcoesIO.put(pedido.pid);
 
 				} catch (InterruptedException e) {
 					Thread.currentThread().interrupt();
 					break;
+				} catch (Exception e) {
+					System.err.println("DISPOSITIVO IO: Erro inesperado no loop: " + e.getMessage());
+					e.printStackTrace();
 				}
 			}
 			System.out.println("Thread do Dispositivo IO encerrada.");
@@ -1295,6 +1349,170 @@ public class SistemaEscalonador {
 									new Word(Opcode.ADD, 0, 2, -1), // r0 = r0 + r2
 									new Word(Opcode.JMP, -1, -1, 3), // volta para o teste
 									new Word(Opcode.STOP, -1, -1, -1), // linha 8 (fim)
+							}),
+					new Program("fatorial",
+							new Word[] {
+									// este fatorial so aceita valores positivos. nao pode ser zero
+									// linha coment
+									new Word(Opcode.LDI, 0, -1, 7), // 0 r0 é valor a calcular fatorial
+									new Word(Opcode.LDI, 1, -1, 1), // 1 r1 é 1 para multiplicar (por r0)
+									new Word(Opcode.LDI, 6, -1, 1), // 2 r6 é 1 o decremento
+									new Word(Opcode.LDI, 7, -1, 8), // 3 r7 tem posicao 8 para fim do programa
+									new Word(Opcode.JMPIE, 7, 0, 0), // 4 se r0=0 pula para r7(=8)
+									new Word(Opcode.MULT, 1, 0, -1), // 5 r1 = r1 * r0 (r1 acumula o produto por cada
+																		// termo)
+									new Word(Opcode.SUB, 0, 6, -1), // 6 r0 = r0 - r6 (r6=1) decrementa r0 para proximo
+																	// termo
+									new Word(Opcode.JMP, -1, -1, 4), // 7 vai p posicao 4
+									new Word(Opcode.STD, 1, -1, 10), // 8 coloca valor de r1 na posição 10
+									new Word(Opcode.STOP, -1, -1, -1), // 9 stop
+									new Word(Opcode.DATA, -1, -1, -1) // 10 ao final o valor está na posição 10 da
+																		// memória
+							}),
+
+					new Program("inputTest",
+							new Word[] {
+									new Word(Opcode.LDI, 8, -1, 1), // R8 = 1 (código para input)
+									new Word(Opcode.LDI, 9, -1, 10), // R9 = 10 (endereço para input)
+									new Word(Opcode.SYSCALL, -1, -1, -1), // SYSCALL IN
+									new Word(Opcode.LDI, 8, -1, 2), // R8 = 2 (código para output)
+									new Word(Opcode.LDI, 9, -1, 10), // R9 = 10 (endereço para output)
+									new Word(Opcode.SYSCALL, -1, -1, -1), // SYSCALL OUT
+									new Word(Opcode.STOP, -1, -1, -1), // STOP
+									new Word(Opcode.DATA, -1, -1, -1), // 10: espaço para input/output
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+							}),
+
+					new Program("fibonacci10",
+							new Word[] { // mesmo que prog exemplo, so que usa r0 no lugar de r8
+									new Word(Opcode.LDI, 1, -1, 0),
+									new Word(Opcode.STD, 1, -1, 20),
+									new Word(Opcode.LDI, 2, -1, 1),
+									new Word(Opcode.STD, 2, -1, 21),
+									new Word(Opcode.LDI, 0, -1, 22),
+									new Word(Opcode.LDI, 6, -1, 6),
+									new Word(Opcode.LDI, 7, -1, 31),
+									new Word(Opcode.LDI, 3, -1, 0),
+									new Word(Opcode.ADD, 3, 1, -1),
+									new Word(Opcode.LDI, 1, -1, 0),
+									new Word(Opcode.ADD, 1, 2, -1),
+									new Word(Opcode.ADD, 2, 3, -1),
+									new Word(Opcode.STX, 0, 2, -1),
+									new Word(Opcode.ADDI, 0, -1, 1),
+									new Word(Opcode.SUB, 7, 0, -1),
+									new Word(Opcode.JMPIG, 6, 7, -1),
+									new Word(Opcode.STOP, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1), // POS 20
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1),
+									new Word(Opcode.DATA, -1, -1, -1) // ate aqui - serie de fibonacci ficara armazenada
+							}),
+					// ... (Other programs remain the same) ...
+					new Program("PC",
+							new Word[] {
+									// Para um N definido (10 por exemplo)
+									// o programa ordena um vetor de N números em alguma posição de memória;
+									// ordena usando bubble sort
+									// loop ate que não swap nada
+									// passando pelos N valores
+									// faz swap de vizinhos se da esquerda maior que da direita
+									new Word(Opcode.LDI, 7, -1, 5), // TAMANHO DO BUBBLE SORT (N)
+									new Word(Opcode.LDI, 6, -1, 5), // aux N
+									new Word(Opcode.LDI, 5, -1, 46), // LOCAL DA MEMORIA
+									new Word(Opcode.LDI, 4, -1, 47), // aux local memoria
+									new Word(Opcode.LDI, 0, -1, 4), // colocando valores na memoria
+									new Word(Opcode.STD, 0, -1, 46),
+									new Word(Opcode.LDI, 0, -1, 3),
+									new Word(Opcode.STD, 0, -1, 47),
+									new Word(Opcode.LDI, 0, -1, 5),
+									new Word(Opcode.STD, 0, -1, 48),
+									new Word(Opcode.LDI, 0, -1, 1),
+									new Word(Opcode.STD, 0, -1, 49),
+									new Word(Opcode.LDI, 0, -1, 2),
+									new Word(Opcode.STD, 0, -1, 50), // colocando valores na memoria até aqui - POS 13
+									new Word(Opcode.LDI, 3, -1, 25), // Posicao para pulo CHAVE 1 -> JMPILM target needs
+																		// to
+																		// be
+																		// logical addr 25
+									new Word(Opcode.STD, 3, -1, 99), // Storing jump target addr 25 at logical addr 99
+									new Word(Opcode.LDI, 3, -1, 22), // Posicao para pulo CHAVE 2 -> JMPIGM target needs
+																		// to
+																		// be
+																		// logical addr 22
+									new Word(Opcode.STD, 3, -1, 98), // Storing jump target addr 22 at logical addr 98
+									new Word(Opcode.LDI, 3, -1, 45), // Posicao para pulo CHAVE 3 -> JMPIEM target needs
+																		// to
+																		// be
+																		// logical addr 45 (STOP)
+									new Word(Opcode.STD, 3, -1, 97), // Storing jump target addr 45 at logical addr 97
+									new Word(Opcode.LDI, 3, -1, 25), // Posicao para pulo CHAVE 4 -> JMPIGM target needs
+																		// to
+																		// be
+																		// logical addr 25
+									new Word(Opcode.STD, 3, -1, 96), // Storing jump target addr 25 at logical addr 96
+									new Word(Opcode.LDI, 6, -1, 0), // r6 = r7 - 1 POS 22
+									new Word(Opcode.ADD, 6, 7, -1),
+									new Word(Opcode.SUBI, 6, -1, 1), // ate aqui
+									// JMPIEM jumps to address stored at logical address P (which is 97) if R6==0
+									new Word(Opcode.JMPIEM, -1, 6, 97), // Jumps to M[97] (should be 45=STOP) if R6==0
+									// LDX R0, R5 <- Loads from M[Logical Addr in R5] into R0. POS 26
+									new Word(Opcode.LDX, 0, 5, -1),
+									new Word(Opcode.LDX, 1, 4, -1), // LDX R1, R4 <- Loads from M[Logical Addr in R4]
+																	// into
+																	// R1
+									new Word(Opcode.LDI, 2, -1, 0), // R2 = R0 - R1
+									new Word(Opcode.ADD, 2, 0, -1),
+									new Word(Opcode.SUB, 2, 1, -1), // Calculate difference R0-R1 into R2
+									new Word(Opcode.ADDI, 4, -1, 1), // Increment R4 (inner loop address pointer)
+									new Word(Opcode.SUBI, 6, -1, 1), // Decrement R6 (inner loop counter)
+									// JMPILM jumps to address stored at P (99) if R2 < 0 (no swap needed)
+									new Word(Opcode.JMPILM, -1, 2, 99), // Jump to M[99] (should be 25) if R2 < 0
+									new Word(Opcode.STX, 5, 1, -1), // SWAP: Store R1 (original M[R4]) into M[R5]
+									new Word(Opcode.SUBI, 4, -1, 1), // Decrement R4 temporarily to get original address
+									new Word(Opcode.STX, 4, 0, -1), // SWAP: Store R0 (original M[R5]) into M[R4]
+									new Word(Opcode.ADDI, 4, -1, 1), // Increment R4 back
+									// JMPIGM jumps to address stored at P (96) if R6 > 0 (continue inner loop)
+									new Word(Opcode.JMPIGM, -1, 6, 96), // Jump to M[96] (should be 25) if R6 > 0
+									// --- End of Inner Loop --- POS 39
+									new Word(Opcode.ADDI, 5, -1, 1), // Increment R5 (outer loop base address)
+									new Word(Opcode.SUBI, 7, -1, 1), // Decrement R7 (outer loop counter)
+									new Word(Opcode.LDI, 4, -1, 0), // r4 = r5 + 1 POS 41
+									new Word(Opcode.ADD, 4, 5, -1),
+									new Word(Opcode.ADDI, 4, -1, 1), // ate aqui -> R4 = R5 + 1
+									// JMPIGM jumps to address stored at P (98) if R7 > 0 (continue outer loop)
+									new Word(Opcode.JMPIGM, -1, 7, 98), // Jump to M[98] (should be 22) if R7 > 0
+									// --- End of Outer Loop ---
+									new Word(Opcode.STOP, -1, -1, -1), // POS 45
+									// Data section - Bubble sort works on logical addresses 46-50
+									new Word(Opcode.DATA, -1, -1, -1), // 46
+									new Word(Opcode.DATA, -1, -1, -1), // 47
+									new Word(Opcode.DATA, -1, -1, -1), // 48
+									new Word(Opcode.DATA, -1, -1, -1), // 49
+									new Word(Opcode.DATA, -1, -1, -1), // 50
+									// Data section for jump targets
+									new Word(Opcode.DATA, -1, -1, -1), // ... up to 95 are padding/unused
+									new Word(Opcode.DATA, -1, -1, -1), // ...
+									new Word(Opcode.DATA, -1, -1, -1), // ...
+									new Word(Opcode.DATA, -1, -1, -1), // ...
+									new Word(Opcode.DATA, -1, -1, -1), // 95
+									new Word(Opcode.DATA, -1, -1, 25), // 96: Target for JMPIGM (inner loop cont)
+									new Word(Opcode.DATA, -1, -1, 45), // 97: Target for JMPIEM (outer loop finish ->
+																		// STOP)
+									new Word(Opcode.DATA, -1, -1, 22), // 98: Target for JMPIGM (outer loop cont)
+									new Word(Opcode.DATA, -1, -1, 25) // 99: Target for JMPILM (inner loop cont, no
+																		// swap)
 							})
 			};
 		}
@@ -1316,6 +1534,62 @@ public class SistemaEscalonador {
 					names.add(p.name);
 			}
 			return String.join(", ", names);
+		}
+	}
+
+	public class IOManager {
+		// Mapeia um PID para uma fila que conterá o valor de input esperado.
+		// Usamos BlockingQueue para que a thread que lê (DispositivoIO) possa esperar
+		// (ficar bloqueada)
+		// até que a thread que escreve (Shell) coloque um item na fila.
+		private final ConcurrentHashMap<Integer, BlockingQueue<Integer>> pendingInputs;
+
+		public IOManager() {
+			this.pendingInputs = new ConcurrentHashMap<>();
+		}
+
+		/**
+		 * Chamado pelo DispositivoIO quando um processo precisa de um input.
+		 * Este método bloqueia a thread chamadora até que um valor seja fornecido.
+		 * 
+		 * @param pid O PID do processo que aguarda input.
+		 * @return O valor de input que foi fornecido.
+		 * @throws InterruptedException se a thread for interrompida enquanto espera.
+		 */
+		public int awaitInput(int pid) throws InterruptedException {
+			BlockingQueue<Integer> inputQueue = new LinkedBlockingQueue<>(1); // Fila com capacidade 1
+			pendingInputs.put(pid, inputQueue);
+
+			System.out.println("\n<SISTEMA> Processo PID " + pid + " aguardando por um input. Use o comando 'input "
+					+ pid + " <valor>'.");
+
+			// A MÁGICA ACONTECE AQUI:
+			// A thread do DispositivoIO vai ficar bloqueada em .take() até que
+			// a thread da Shell chame .provideInput() e coloque um valor na fila.
+			int valor = inputQueue.take();
+
+			pendingInputs.remove(pid); // Remove da lista de pendentes após receber o valor
+			return valor;
+		}
+
+		/**
+		 * Chamado pela Shell para fornecer um valor de input a um processo.
+		 * 
+		 * @param pid   O PID do processo que receberá o valor.
+		 * @param value O valor a ser entregue.
+		 * @return true se o processo estava aguardando input, false caso contrário.
+		 */
+		public boolean provideInput(int pid, int value) {
+			BlockingQueue<Integer> inputQueue = pendingInputs.get(pid);
+			if (inputQueue != null) {
+				// Oferece o valor para a fila. Como a capacidade é 1,
+				// e a outra thread está bloqueada em take(), isso sempre funcionará.
+				inputQueue.offer(value);
+				return true;
+			} else {
+				// O processo não estava esperando por input.
+				return false;
+			}
 		}
 	}
 
