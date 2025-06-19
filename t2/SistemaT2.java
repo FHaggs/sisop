@@ -11,8 +11,8 @@ public class SistemaT2 {
 
     // --- Configuração Global do Sistema ---
     private static final int DELTA_T = 5;
-    private static final int DISK_SWAP_TIME_MS = 100; // Tempo para operações de disco de paginação
-    private static final int IO_DEVICE_TIME_MS = 250; // Tempo para I/O do usuário (input/output)
+    private static final int DISK_SWAP_TIME_MS = 10; // Tempo para operações de disco de paginação
+    private static final int IO_DEVICE_TIME_MS = 30; // Tempo para I/O do usuário (input/output)
 
     // ##################################################################
     // ## 1. NOVAS ESTRUTURAS DE DADOS PARA MEMÓRIA VIRTUAL
@@ -160,6 +160,7 @@ public class SistemaT2 {
         private volatile boolean cpuStop;
         private boolean debug;
         private ProcessControlBlock runningProcess; // CPU agora conhece o PCB do processo em execução
+        private int faultingAddress = -1;
 
         public CPU(Memory _mem, boolean _debug, int _pageSize, int _quantum) {
             m = _mem.pos;
@@ -213,6 +214,7 @@ public class SistemaT2 {
                 System.out.println(
                         ">>> CPU: Endereço " + logicalAddress + " (Página " + pageNumber + ") não está na memória.");
                 irpt = Interrupts.intPageFault; // Gera a interrupção!
+                faultingAddress = logicalAddress;
                 return -1;
             }
 
@@ -358,7 +360,7 @@ public class SistemaT2 {
             if (irpt != Interrupts.noInterrupt) {
                 ih.handle(irpt, pc);
             }
-            cpuStop = true;
+            // cpuStop = true;
         }
 
         // Getters/Setters e outros métodos auxiliares
@@ -373,6 +375,10 @@ public class SistemaT2 {
 
         public int[] getRegs() {
             return Arrays.copyOf(reg, reg.length);
+        }
+
+        public int getFaultingAddress() {
+            return faultingAddress;
         }
 
         public void stopCPU() {
@@ -409,14 +415,13 @@ public class SistemaT2 {
                     currentProcess.contexto.pc = interruptedPC; // Salva o PC exato da falha
                     so.gp.saveContext(currentProcess); // Salva o resto (registradores)
                     so.gp.blockProcess(currentProcess, "PAGE_FAULT");
-                    so.mm.handlePageFault(currentProcess, interruptedPC);
+                    int faultAddress = cpu.getFaultingAddress();
+                    so.mm.handlePageFault(currentProcess, faultAddress);
                     so.gp.schedule();
                     break;
 
                 case intTempo:
-                    so.gp.saveContext(currentProcess);
-                    so.gp.addToReadyQueue(currentProcess);
-                    so.gp.schedule();
+                    so.gp.preempt(currentProcess);
                     break;
                 case intSTOP:
                     so.gp.terminateProcess(currentProcess);
@@ -447,7 +452,7 @@ public class SistemaT2 {
             this.programSize = programSize;
             this.contexto = new Contexto();
             this.state = ProcessState.BLOCKED; // Inicia bloqueado esperando a 1ª página
-            this.blockedReason = "Aguardando Carga Inicial";
+            this.blockedReason = "PAGE_FAULT";
 
             int numPages = (int) Math.ceil((double) programSize / pageSize);
             this.pageTable = new PageTableEntry[numPages];
@@ -488,6 +493,7 @@ public class SistemaT2 {
 
         public void handle(ProcessControlBlock pcb) {
             so.gp.blockProcessForIO(pcb, pcb.contexto.regs[9], pcb.contexto.regs[8] == 1);
+            so.hw.cpu.stopCPU();
         }
     }
 
@@ -534,6 +540,27 @@ public class SistemaT2 {
             System.arraycopy(pageData, 0, so.hw.mem.pos, frameNumber * pageSize, pageSize);
         }
 
+        public void loadPageFromExecutable(String programName, int pageNumber, int frameNumber, int pageSize) {
+            Word[] programImage = so.progs.retrieveProgram(programName);
+            if (programImage == null) {
+                System.err.println("DISCO: ERRO CRÍTICO - Tentando carregar página de programa não encontrado: " + programName);
+                for (int i = 0; i < pageSize; i++) {
+                    so.hw.mem.pos[frameNumber * pageSize + i] = new Word(Opcode.___, -1, -1, -1);
+                }
+                return;
+            }
+
+            int pageStartInImage = pageNumber * pageSize;
+            int wordsToCopy = Math.min(pageSize, programImage.length - pageStartInImage);
+
+            System.arraycopy(programImage, pageStartInImage, so.hw.mem.pos, frameNumber * pageSize, wordsToCopy);
+
+            if (wordsToCopy < pageSize) {
+                for (int i = wordsToCopy; i < pageSize; i++) {
+                    so.hw.mem.pos[frameNumber * pageSize + i] = new Word(Opcode.___, -1, -1, -1);
+                }
+            }
+        }
     }
 
     public class MemoryManagment {
@@ -712,6 +739,7 @@ public class SistemaT2 {
                 int pid = nextPid.getAndIncrement();
                 ProcessControlBlock pcb = new ProcessControlBlock(pid, programa.length, programName, so.hw.pageSize);
                 allProcesses.put(pid, pcb);
+                bloqueados.add(pcb);
                 System.out.println("GP: Processo " + pid + " (" + programName
                         + ") criado. Forçando page fault inicial para a página 0.");
                 so.mm.handlePageFault(pcb, 0); // O processo começa bloqueado e espera a carga da 1ª página
@@ -773,6 +801,20 @@ public class SistemaT2 {
             }
         }
 
+        public void preempt(ProcessControlBlock pcb) {
+            schedulerLock.lock();
+            try {
+                if (pcb != null && pcb.state == ProcessState.RUNNING) {
+                    saveContext(pcb);
+                    addToReadyQueue(pcb);
+                    running = null;
+                    schedule();
+                }
+            } finally {
+                schedulerLock.unlock();
+            }
+        }
+
         // ... (outros métodos como terminateProcess, saveContext, etc. adaptados)
         public void saveContext(ProcessControlBlock pcb) {
             if (pcb != null) {
@@ -789,6 +831,7 @@ public class SistemaT2 {
         }
 
         public void blockProcessForIO(ProcessControlBlock pcb, int address, boolean isRead) {
+            saveContext(pcb);
             blockProcess(pcb, "IO");
             so.filaIO.add(new PedidoIO(pcb.pid, address, isRead));
             schedule();
@@ -1206,7 +1249,7 @@ public class SistemaT2 {
 
                     int oldPid = -1; // Usado para notificar sobre a conclusão do SAVE
                     if (pedido.tipo == PedidoDiscoTipo.SAVE_TO_SWAP) {
-                        so.diskManager.savePageToSwap(pedido.swapLocation, pedido.frameNumber);
+                        so.diskManager.savePageToSwap(pedido.swapLocation, pedido.frameNumber, so.hw.pageSize);
                         oldPid = so.mm.getFrameOwner(pedido.frameNumber).pid;
                         so.mm.unpinFrame(pedido.frameNumber); // Libera o frame após salvar
                         System.out.println("DISCO: Página do PID " + oldPid + " salva no swap. Frame "
@@ -1216,9 +1259,9 @@ public class SistemaT2 {
                     } else { // É um LOAD
                         if (pedido.tipo == PedidoDiscoTipo.LOAD_FROM_EXECUTABLE) {
                             so.diskManager.loadPageFromExecutable(pedido.programName, pedido.pageNumber,
-                                    pedido.frameNumber);
+                                    pedido.frameNumber, so.hw.pageSize);
                         } else { // LOAD_FROM_SWAP
-                            so.diskManager.loadPageFromSwap(pedido.swapLocation, pedido.frameNumber);
+                            so.diskManager.loadPageFromSwap(pedido.swapLocation, pedido.frameNumber, so.hw.pageSize);
                         }
                         so.mm.unpinFrame(pedido.frameNumber);
                         System.out.println("DISCO: Página " + pedido.pageNumber + " do PID " + pedido.pid
@@ -1260,7 +1303,7 @@ public class SistemaT2 {
 
     public static void main(String[] args) {
         // Memória menor para forçar swapping mais rápido
-        SistemaT2 s = new SistemaT2(128, 16);
+        SistemaT2 s = new SistemaT2(1200, 10);
         s.startSystem();
     }
 
@@ -1309,6 +1352,10 @@ public class SistemaT2 {
                                     new Word(Opcode.LDI, 2, -1, 3),
                                     new Word(Opcode.LDI, 3, -1, 4),
                                     new Word(Opcode.LDI, 4, -1, 5),
+                                    new Word(Opcode.LDI, 5, -1, 6),
+                                    new Word(Opcode.LDI, 6, -1, 7),
+                                    new Word(Opcode.LDI, 7, -1, 8),
+                                    new Word(Opcode.LDI, 8, -1, 9),
                                     new Word(Opcode.LDI, 5, -1, 6),
                                     new Word(Opcode.LDI, 6, -1, 7),
                                     new Word(Opcode.LDI, 7, -1, 8),
