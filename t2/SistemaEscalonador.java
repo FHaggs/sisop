@@ -424,12 +424,9 @@ public class SistemaEscalonador {
 						break;
 
 					case SYSCALL:
-						// MODIFICADO: Passa o PCB para o handler
+						pc++; // AVANÇA O PC ANTES DE EXECUTAR O HANDLER
 						ProcessControlBlock pcb = so.gp.getRunningProcess();
 						sysCall.handle(pcb);
-						if (irpt == Interrupts.noInterrupt) {
-							pc++;
-						}
 						break;
 
 					case STOP:
