@@ -1461,8 +1461,12 @@ public class SistemaT2 {
     }
 
     public static void main(String[] args) {
-        // Memória menor para forçar swapping mais rápido
-        SistemaT2 s = new SistemaT2(20, 10);
+        SistemaT2 s = new SistemaT2(1200, 16);
+        // Teste para mostrar vitimacao de pagina
+        // SistemaT2 s = new SistemaT2(24, 12);
+        // Rodar 2 input test
+        // Mais fatorial 
+
         s.startSystem();
     }
 
@@ -1571,36 +1575,36 @@ public class SistemaT2 {
 
                     new Program("fibonacci10",
                             new Word[] { // mesmo que prog exemplo, so que usa r0 no lugar de r8
-                                    new Word(Opcode.LDI, 1, -1, 0),
-                                    new Word(Opcode.STD, 1, -1, 20),
-                                    new Word(Opcode.LDI, 2, -1, 1),
-                                    new Word(Opcode.STD, 2, -1, 21),
-                                    new Word(Opcode.LDI, 0, -1, 22),
-                                    new Word(Opcode.LDI, 6, -1, 6),
-                                    new Word(Opcode.LDI, 7, -1, 31),
-                                    new Word(Opcode.LDI, 3, -1, 0),
-                                    new Word(Opcode.ADD, 3, 1, -1),
-                                    new Word(Opcode.LDI, 1, -1, 0),
-                                    new Word(Opcode.ADD, 1, 2, -1),
-                                    new Word(Opcode.ADD, 2, 3, -1),
-                                    new Word(Opcode.STX, 0, 2, -1),
-                                    new Word(Opcode.ADDI, 0, -1, 1),
-                                    new Word(Opcode.SUB, 7, 0, -1),
-                                    new Word(Opcode.JMPIG, 6, 7, -1),
-                                    new Word(Opcode.STOP, -1, -1, -1),
-                                    new Word(Opcode.DATA, -1, -1, -1),
-                                    new Word(Opcode.DATA, -1, -1, -1),
-                                    new Word(Opcode.DATA, -1, -1, -1),
-                                    new Word(Opcode.DATA, -1, -1, -1), // POS 20
-                                    new Word(Opcode.DATA, -1, -1, -1),
-                                    new Word(Opcode.DATA, -1, -1, -1),
-                                    new Word(Opcode.DATA, -1, -1, -1),
-                                    new Word(Opcode.DATA, -1, -1, -1),
-                                    new Word(Opcode.DATA, -1, -1, -1),
-                                    new Word(Opcode.DATA, -1, -1, -1),
-                                    new Word(Opcode.DATA, -1, -1, -1),
-                                    new Word(Opcode.DATA, -1, -1, -1),
-                                    new Word(Opcode.DATA, -1, -1, -1) // ate aqui - serie de fibonacci ficara armazenada
+								new Word(Opcode.LDI, 1, -1, 0),
+								new Word(Opcode.STD, 1, -1, 20),
+								new Word(Opcode.LDI, 2, -1, 1),
+								new Word(Opcode.STD, 2, -1, 21),
+								new Word(Opcode.LDI, 0, -1, 22),
+								new Word(Opcode.LDI, 6, -1, 6),
+								new Word(Opcode.LDI, 7, -1, 31),
+								new Word(Opcode.LDI, 3, -1, 0),
+								new Word(Opcode.ADD, 3, 1, -1),
+								new Word(Opcode.LDI, 1, -1, 0),
+								new Word(Opcode.ADD, 1, 2, -1),
+								new Word(Opcode.ADD, 2, 3, -1),
+								new Word(Opcode.STX, 0, 2, -1),
+								new Word(Opcode.ADDI, 0, -1, 1),
+								new Word(Opcode.SUB, 7, 0, -1),
+								new Word(Opcode.JMPIG, 6, 7, -1),
+								new Word(Opcode.STOP, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1), // POS 20
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1),
+								new Word(Opcode.DATA, -1, -1, -1) // ate aqui - serie de fibonacci ficara armazenada
                             }),
                     // ... (Other programs remain the same) ...
                     new Program("PC",
