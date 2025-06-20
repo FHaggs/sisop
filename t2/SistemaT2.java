@@ -185,6 +185,50 @@ public class SistemaT2 {
                 System.out.println("CPU: Contexto carregado para PID " + pcb.pid + " (PC=" + pc + ")");
         }
 
+        public int translateAddress(int logicalAddress, PageTableEntry[] processPageTable) {
+
+            if (processPageTable == null) {
+
+                System.err.println(">>> ERRO CPU (translate): Tabela de paginas fornecida eh nula!");
+
+                return -1;
+
+            }
+
+            int pageNumber = logicalAddress / pageSize;
+
+            int offset = logicalAddress % pageSize;
+
+            if (pageNumber < 0 || pageNumber >= processPageTable.length || processPageTable[pageNumber] == null) {
+
+                System.err.println(">>> ERRO CPU (translate): Endereco logico " + logicalAddress + " (pagina "
+
+                        + pageNumber + ") fora dos limites ou nao mapeado na tabela fornecida.");
+
+                return -1;
+
+            }
+
+            int frameNumber = processPageTable[pageNumber].frameNumber;
+
+            int physicalAddress = (frameNumber * pageSize) + offset;
+
+            // Apenas uma verificação final de sanidade nos limites da memória física
+
+            if (physicalAddress < 0 || physicalAddress >= m.length) {
+
+                System.err.println(">>> ERRO CPU (translate): Endereco fisico calculado " + physicalAddress
+
+                        + " esta fora dos limites da memoria.");
+
+                return -1;
+
+            }
+
+            return physicalAddress;
+
+        }
+
         /**
          * Traduz um endereço lógico para físico.
          * Esta é a função central que aciona a Memória Virtual.
@@ -543,7 +587,8 @@ public class SistemaT2 {
         public void loadPageFromExecutable(String programName, int pageNumber, int frameNumber, int pageSize) {
             Word[] programImage = so.progs.retrieveProgram(programName);
             if (programImage == null) {
-                System.err.println("DISCO: ERRO CRÍTICO - Tentando carregar página de programa não encontrado: " + programName);
+                System.err.println(
+                        "DISCO: ERRO CRÍTICO - Tentando carregar página de programa não encontrado: " + programName);
                 for (int i = 0; i < pageSize; i++) {
                     so.hw.mem.pos[frameNumber * pageSize + i] = new Word(Opcode.___, -1, -1, -1);
                 }
@@ -727,6 +772,32 @@ public class SistemaT2 {
             this.aptos = new LinkedList<>();
             this.bloqueados = new LinkedList<>();
             this.allProcesses = new ConcurrentHashMap<>();
+        }
+
+        public ProcessControlBlock findProcessInBlockedQueue(int pid) {
+
+            schedulerLock.lock();
+
+            try {
+
+                for (ProcessControlBlock pcb : bloqueados) {
+
+                    if (pcb.pid == pid) {
+
+                        return pcb;
+
+                    }
+
+                }
+
+                return null; // Não encontrado
+
+            } finally {
+
+                schedulerLock.unlock();
+
+            }
+
         }
 
         public ProcessControlBlock getProcess(int pid) {
@@ -919,8 +990,14 @@ public class SistemaT2 {
                     PageTableEntry pte = pcb.pageTable[pageNumber];
 
                     if (!pte.validBit) {
-                        System.err.println("IO DEV: ERRO FATAL! PID " + pcb.pid + " pediu I/O para página " + pageNumber
-                                + " que não está na memória.");
+                        if (pedido.retry) {
+                            System.err.println(
+                                    "IO DEV: ERRO FATAL! PID " + pcb.pid + " pediu I/O para página " + pageNumber
+                                            + " que não está na memória.");
+                            so.mm.handlePageFault(pcb, pedido.endLogico);
+                        }
+                        pedido.retry = false;
+                        so.filaIO.add(pedido);
                         continue;
                     }
 
@@ -931,9 +1008,82 @@ public class SistemaT2 {
                     Thread.sleep(IO_DEVICE_TIME_MS);
 
                     if (pedido.isRead) {
-                        // ... Lógica de input ...
+
+                        // É uma LEITURA (INPUT)
+
+                        try {
+
+                            // 1. Bloqueia esta thread até que a Shell forneça um valor via IOManager
+
+                            int valorLido = so.ioManager.awaitInput(pedido.pid);
+
+                            // 2. Após receber o valor, encontra o PCB e escreve na memória
+
+                            ProcessControlBlock pcbDoPedido = so.gp.findProcessInBlockedQueue(pedido.pid);
+
+                            if (pcbDoPedido == null) {
+
+                                System.err.println("DISPOSITIVO IO: ERRO! PID " + pedido.pid
+
+                                        + " não está mais bloqueado. Abortando escrita na memória.");
+
+                            }
+
+                            int endFisico = so.hw.cpu.translateAddress(pedido.endLogico, pcbDoPedido.pageTable);
+
+                            if (endFisico != -1) {
+
+                                so.hw.mem.pos[endFisico].opc = Opcode.DATA;
+
+                                so.hw.mem.pos[endFisico].p = valorLido;
+
+                                System.out
+
+                                        .println("DISPOSITIVO IO: Leitura concluída para PID " + pedido.pid + ". Valor "
+
+                                                + valorLido + " escrito no endereco fisico " + endFisico);
+
+                            } else {
+                                System.err.println(
+                                        "DISPOSITIVO IO: ERRO! Endereço físico inválido para escrita do input.");
+                            }
+
+                        } catch (InterruptedException e) {
+
+                            System.out.println("DISPOSITIVO IO: A espera por input para o PID " + pedido.pid
+
+                                    + " foi interrompida.");
+
+                            Thread.currentThread().interrupt(); // Restaura o status de interrupção
+
+                            continue; // Pula para o próximo pedido
+
+                        }
+
                     } else {
-                        // ... Lógica de output ...
+
+                        // É uma ESCRITA (OUTPUT), a lógica antiga continua válida
+
+                        ProcessControlBlock pcbDoPedido = so.gp.findProcessInBlockedQueue(pedido.pid);
+
+                        if (pcbDoPedido == null) {
+
+                            System.err.println("DISPOSITIVO IO: ERRO! Processo PID " + pedido.pid
+
+                                    + " não foi encontrado. Abortando OUTPUT.");
+
+                            continue;
+
+                        }
+
+                        int endFisico = so.hw.cpu.translateAddress(pedido.endLogico, pcbDoPedido.pageTable);
+
+                        int valorEscrito = so.hw.mem.pos[endFisico].p;
+
+                        System.out.println("DISPOSITIVO IO: Escrita concluída para PID " + pedido.pid
+
+                                + ". Valor lido do endereco fisico " + endFisico + " = " + valorEscrito);
+
                     }
 
                     System.out.println("IO DEV: I/O concluído. Liberando frame " + frameNumber);
@@ -1115,11 +1265,13 @@ public class SistemaT2 {
     public class PedidoIO {
         public int pid, endLogico;
         public boolean isRead;
+        public boolean retry;
 
         public PedidoIO(int p, int e, boolean r) {
             pid = p;
             endLogico = e;
             isRead = r;
+            retry = true;
         }
     }
 
@@ -1275,21 +1427,24 @@ public class SistemaT2 {
             }
         }
     }
+
     public class DiskInterruptHandlerThread extends Thread {
-		@Override
-		public void run() {
-			while(!so.shutdown) {
-				try {
-					InterrupcaoDisco irpt = so.filaInterrupcoesDisco.take();
-					if (irpt.tipo == InterrupcaoDiscoTipo.PAGE_LOAD_COMPLETE) {
-						so.mm.finalizePageLoad(irpt.pid, irpt.pageNumber, irpt.frameNumber);
-					} else { // PAGE_SAVE_COMPLETE
-						so.mm.handlePageSaveCompletion(irpt.pid, irpt.pageNumber, irpt.frameNumber);
-					}
-				} catch (InterruptedException e) { break; }
-			}
-		}
-	}
+        @Override
+        public void run() {
+            while (!so.shutdown) {
+                try {
+                    InterrupcaoDisco irpt = so.filaInterrupcoesDisco.take();
+                    if (irpt.tipo == InterrupcaoDiscoTipo.PAGE_LOAD_COMPLETE) {
+                        so.mm.finalizePageLoad(irpt.pid, irpt.pageNumber, irpt.frameNumber);
+                    } else { // PAGE_SAVE_COMPLETE
+                        so.mm.handlePageSaveCompletion(irpt.pid, irpt.pageNumber, irpt.frameNumber);
+                    }
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+        }
+    }
 
     public void startSystem() {
         new ShellThread().start();
@@ -1303,7 +1458,7 @@ public class SistemaT2 {
 
     public static void main(String[] args) {
         // Memória menor para forçar swapping mais rápido
-        SistemaT2 s = new SistemaT2(1200, 10);
+        SistemaT2 s = new SistemaT2(20, 10);
         s.startSystem();
     }
 
