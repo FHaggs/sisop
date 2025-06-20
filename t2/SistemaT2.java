@@ -175,6 +175,7 @@ public class SistemaT2 {
          * Carrega o contexto de um processo para execução.
          */
         public void setContext(ProcessControlBlock pcb) {
+            System.out.println("DEBUG: SET CONTEXT");
             this.runningProcess = pcb;
             this.pc = pcb.contexto.pc;
             System.arraycopy(pcb.contexto.regs, 0, this.reg, 0, pcb.contexto.regs.length);
@@ -536,6 +537,7 @@ public class SistemaT2 {
         }
 
         public void handle(ProcessControlBlock pcb) {
+            so.gp.saveContext(pcb);
             so.gp.blockProcessForIO(pcb, pcb.contexto.regs[9], pcb.contexto.regs[8] == 1);
             so.hw.cpu.stopCPU();
         }
@@ -888,9 +890,11 @@ public class SistemaT2 {
 
         // ... (outros métodos como terminateProcess, saveContext, etc. adaptados)
         public void saveContext(ProcessControlBlock pcb) {
+            System.out.println("DEBUG: CONTEXTO ATUAL: " + Arrays.toString(pcb.contexto.regs));
             if (pcb != null) {
                 pcb.contexto.pc = cpu.getPC();
                 pcb.contexto.regs = cpu.getRegs();
+                System.out.println("DEBUG: CONTEXTO SALVO: " + Arrays.toString(pcb.contexto.regs));
             }
         }
 
@@ -902,7 +906,7 @@ public class SistemaT2 {
         }
 
         public void blockProcessForIO(ProcessControlBlock pcb, int address, boolean isRead) {
-            saveContext(pcb);
+            // saveContext(pcb);
             blockProcess(pcb, "IO");
             so.filaIO.add(new PedidoIO(pcb.pid, address, isRead));
             schedule();
