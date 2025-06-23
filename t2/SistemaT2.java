@@ -388,6 +388,10 @@ public class SistemaT2 {
                     case STOP:
                         irpt = Interrupts.intSTOP;
                         break;
+                    case DATA:
+                        // Instrução de dados, não faz nada
+                        pc++;
+                        break;
 
                     default:
                         irpt = Interrupts.intInstrucaoInvalida;
@@ -550,8 +554,23 @@ public class SistemaT2 {
             hw = _hw;
         }
 
+        public void dump(Word w) {
+            System.out.printf("[ %-7s %3d %3d %4d ]", w.opc, w.ra, w.rb, w.p);
+        }
+
         public void dump(int ini, int fim) {
-            /* ... */ }
+            System.out.println("--- Dump da Memoria Fisica (Enderecos: " + ini + " a " + (fim - 1) + ") ---");
+            Word[] m = hw.mem.pos;
+            int end = Math.min(fim, m.length);
+            int start = Math.max(0, ini);
+
+            for (int i = start; i < end; i++) {
+                System.out.printf("%04d: ", i);
+                dump(m[i]);
+                System.out.println();
+            }
+            System.out.println("--------------------------------------------------");
+        }
     }
 
     // --- NOVOS GERENCIADORES DE DISCO E MEMÓRIA VIRTUAL ---
@@ -1492,10 +1511,13 @@ public class SistemaT2 {
 
     public static void main(String[] args) {
         // SistemaT2 s = new SistemaT2(1200, 16);
+        // Mostrar io com input Test ou fatorialV2
+
         // Teste para mostrar vitimacao de pagina
         SistemaT2 s = new SistemaT2(24, 12);
         // Rodar 2 input test
-        // Mais fatorial
+        // Mais progMinimo
+        // Pode usar o inputBlock para isso tbm
 
         s.startSystem();
     }
@@ -1601,6 +1623,34 @@ public class SistemaT2 {
                                     new Word(Opcode.DATA, -1, -1, -1),
                                     new Word(Opcode.DATA, -1, -1, -1),
                                     new Word(Opcode.DATA, -1, -1, -1),
+                            }),
+                    new Program("inputBlock",
+                            new Word[] {
+                                    new Word(Opcode.LDI, 8, -1, 1), // R8 = 1 (código para input)
+                                    new Word(Opcode.LDI, 9, -1, 10), // R9 = 10 (endereço para input)
+                                    new Word(Opcode.SYSCALL, -1, -1, -1), // SYSCALL IN
+                                    new Word(Opcode.DATA, -1, -1, -1), // Gastar espaço para testar mem virtual
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.DATA, -1, -1, -1),
+                                    new Word(Opcode.LDI, 8, -1, 2), // R8 = 2 (código para output)
+                                    new Word(Opcode.LDI, 9, -1, 10), // R9 = 10 (endereço para output)
+                                    new Word(Opcode.SYSCALL, -1, -1, -1), // SYSCALL OUT
+                                    new Word(Opcode.STOP, -1, -1, -1), // STOP
+                                    new Word(Opcode.DATA, -1, -1, -1), // 10: espaço para input/output
                             }),
 
                     new Program("fibonacci10",
