@@ -175,7 +175,7 @@ public class SistemaT2 {
          * Carrega o contexto de um processo para execução.
          */
         public void setContext(ProcessControlBlock pcb) {
-            System.out.println("DEBUG: SET CONTEXT");
+            // System.out.println("DEBUG: SET CONTEXT");
             this.runningProcess = pcb;
             this.pc = pcb.contexto.pc;
             System.arraycopy(pcb.contexto.regs, 0, this.reg, 0, pcb.contexto.regs.length);
@@ -909,11 +909,11 @@ public class SistemaT2 {
 
         // ... (outros métodos como terminateProcess, saveContext, etc. adaptados)
         public void saveContext(ProcessControlBlock pcb) {
-            System.out.println("DEBUG: CONTEXTO ATUAL: " + Arrays.toString(pcb.contexto.regs));
+            // System.out.println("DEBUG: CONTEXTO ATUAL: " + Arrays.toString(pcb.contexto.regs));
             if (pcb != null) {
                 pcb.contexto.pc = cpu.getPC();
                 pcb.contexto.regs = cpu.getRegs();
-                System.out.println("DEBUG: CONTEXTO SALVO: " + Arrays.toString(pcb.contexto.regs));
+                // System.out.println("DEBUG: CONTEXTO SALVO: " + Arrays.toString(pcb.contexto.regs));
             }
         }
 
@@ -1510,6 +1510,7 @@ public class SistemaT2 {
     }
 
     public static void main(String[] args) {
+        // Mais para IO
         // SistemaT2 s = new SistemaT2(1200, 16);
         // Mostrar io com input Test ou fatorialV2
 
